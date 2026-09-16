@@ -1,0 +1,25 @@
+# pnpm workspace and supply-chain policy (same as the platform repository).
+#
+# minimumReleaseAge: packages published in the last 3 days are not resolved.
+# blockExoticSubdeps: every transitive dependency comes from the registry.
+# allowBuilds: lifecycle scripts run only for the packages listed.
+
+packages:
+  - "packages/*"
+
+allowBuilds:
+  '@biomejs/biome': true
+  esbuild: true
+
+blockExoticSubdeps: true
+
+minimumReleaseAge: 4320 # 3 days
+
+minimumReleaseAgeExclude:
+  - "@ensc/*"
+
+minimumReleaseAgeStrict: false
+
+# Security overrides for transitive dependencies (see SECURITY.md).
+overrides:
+  "esbuild@>=0.27.3 <0.28.1": "0.28.2"

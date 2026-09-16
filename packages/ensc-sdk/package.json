@@ -1,0 +1,78 @@
+{
+  "name": "@ensc/sdk",
+  "version": "0.4.0",
+  "description": "Official ENSC API client SDK: typed, server-side, with automatic request encryption, Ed25519 signing and sealed-response verification",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prosperavest/ensc-sdk.git",
+    "directory": "packages/ensc-sdk"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./web3": {
+      "types": "./dist/web3/index.d.ts",
+      "import": "./dist/web3/index.js",
+      "require": "./dist/web3/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "NOTICE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo coverage"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "zod": "4.6.4"
+  },
+  "peerDependencies": {
+    "viem": "^2.21.50"
+  },
+  "peerDependenciesMeta": {
+    "viem": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@ensc/api-schemas": "workspace:*",
+    "@ensc/protocol": "workspace:*",
+    "@vitest/coverage-v8": "4.1.11",
+    "tsup": "8.5.1",
+    "typescript": "6.0.3",
+    "viem": "2.56.5",
+    "vitest": "4.1.11"
+  },
+  "keywords": [
+    "ensc",
+    "stablecoin",
+    "prosperavest",
+    "api",
+    "sdk",
+    "web3"
+  ]
+}
