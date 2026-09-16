@@ -195,7 +195,7 @@ Transient failures (network errors, 5xx) are retried automatically (`maxRetries`
 
 ## Verifying this package
 
-`@ensc/sdk` is published only by GitHub Actions, from `sdk-v*` release tags, using npm trusted publishing (OIDC). There is no long-lived npm token. Every published version is registry-signed; run `npm audit signatures` after installing to verify it. A legitimate release has exactly four runtime dependencies (`@noble/ciphers`, `@noble/curves`, `@noble/hashes`, and `zod` for the exported API types), an optional `viem` peer, and **no install scripts**; anything else is a red flag. A provenance attestation is planned; it requires publishing from a public repo.
+`@ensc/sdk` is staged only by GitHub Actions, from `sdk-v*` release tags, using npm trusted publishing (OIDC), and goes live only when a maintainer approves the staged version with 2FA. There is no long-lived npm token. Every published version is registry-signed; run `npm audit signatures` after installing to verify it. A legitimate release has exactly four runtime dependencies (`@noble/ciphers`, `@noble/curves`, `@noble/hashes`, and `zod` for the exported API types), an optional `viem` peer, and **no install scripts**; anything else is a red flag. From 0.4.0 every version also carries a provenance attestation linking it to the commit and workflow run in `github.com/prosperavest/ensc-sdk`; npm shows it on the version page, and `npm audit signatures` checks it.
 
 ## License
 
