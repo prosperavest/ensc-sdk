@@ -679,7 +679,16 @@ export const encryptedRequestEnvelopeSchema = z
     encKeyId: encKeyIdSchema,
     /** 12-byte IV, base64url (16 chars). */
     iv: z.string().regex(/^[A-Za-z0-9_-]{16}$/),
-    ciphertext: z.string().regex(/^[A-Za-z0-9_-]{1,1398104}$/),
+    /**
+     * base64url of at most 1 MiB of ciphertext. The length lives in min/max,
+     * not in the regex quantifier: edge schema validators refuse a repetition
+     * bound that large.
+     */
+    ciphertext: z
+      .string()
+      .min(1)
+      .max(1_398_104)
+      .regex(/^[A-Za-z0-9_-]+$/),
     /** 16-byte GCM tag, base64url (22 chars). */
     tag: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
   })
