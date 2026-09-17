@@ -18,7 +18,11 @@ export const evmAddressSchema = z
 /** Decimal amount as string (e.g. "100", "0.001"). Validated, not converted here. */
 export const decimalAmountSchema = z
   .string()
-  .regex(/^\d+(\.\d+)?$/, 'Must be a decimal string with no commas or signs');
+  .max(60, 'Amount is too long')
+  .regex(/^\d+(\.\d+)?$/, 'Must be a decimal string with no commas or signs')
+  .refine((v) => (v.split('.')[0] ?? '').replace(/^0+/, '').length <= 40, {
+    message: 'Amount is larger than any supported asset can represent',
+  });
 
 export const chainSlugSchema = z.string().min(2).max(40);
 
@@ -61,7 +65,15 @@ export const cidrSchema = z
   .refine(
     (v) => IPV4_CIDR_RE.test(v) || IPV6_CIDR_RE.test(v),
     'Must be an IPv4/IPv6 address or CIDR',
-  );
+  )
+  .refine((v) => {
+    // An allowlist entry must allow a list, not the whole internet: at
+    // least /8 for IPv4 and /32 for IPv6.
+    const slash = v.indexOf('/');
+    if (slash < 0) return true;
+    const prefix = Number(v.slice(slash + 1));
+    return v.includes(':') ? prefix >= 32 : prefix >= 8;
+  }, 'A CIDR block must be /8 or narrower (IPv4) or /32 or narrower (IPv6)');
 
 /** Per-key IP allowlist. Mandatory (min 1) for live keys; the API enforces that rule. */
 export const ipAllowlistSchema = z.array(cidrSchema).min(1).max(32);

@@ -29,7 +29,7 @@ export function generateIdempotencyKey(): string {
 
 export interface SignMutationInput {
   method: string;
-  /** Request path, e.g. `/v1/mint`. Must match what the server sees. */
+  /** Request path, e.g. `/v1/conversions`. Must match what the server sees. */
   path: string;
   /** Canonicalized query input - string, record, or undefined. */
   query: string | Record<string, string> | undefined;

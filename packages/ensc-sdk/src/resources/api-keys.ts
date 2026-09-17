@@ -9,7 +9,7 @@
  */
 
 import type * as api from '@ensc/api-schemas';
-import type { HttpClient, ListParams } from '../http.js';
+import type { HttpClient, ListByEnvParams } from '../http.js';
 
 export class ApiKeysResource {
   readonly #http: HttpClient;
@@ -19,11 +19,11 @@ export class ApiKeysResource {
   }
 
   /** List API keys (cursor-paginated). Key material is never returned. */
-  list(params: ListParams = {}): Promise<api.ListApiKeysResponse> {
+  list(params: ListByEnvParams = {}): Promise<api.ListApiKeysResponse> {
     return this.#http.request<api.ListApiKeysResponse>({
       method: 'GET',
       path: '/v1/api-keys',
-      query: { limit: params.limit, cursor: params.cursor },
+      query: { limit: params.limit, cursor: params.cursor, env: params.env },
     });
   }
 }

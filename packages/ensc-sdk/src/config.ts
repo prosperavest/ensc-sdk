@@ -6,17 +6,17 @@
  * Resolved secrets are held in a closure inside the client and are never logged,
  * serialized, or exposed as enumerable properties.
  *
- * Four credentials are issued together by the dashboard when a merchant
- * generates keys:
+ * Three secrets and three identifiers are issued together by the dashboard
+ * when a merchant generates keys:
  *
  *   apiKey             identifies the merchant (Bearer token)
  *   encryptionKey      AES-256-GCM key that encrypts every request body
  *   signingPrivateKey  Ed25519 key that signs every write and is the recipient
  *                      key every sealed response is opened with
  *
- * plus the two ids (`encryptionKeyId`, `signingKeyId`) the API uses to look the
- * key material up. All are required: since API version 2026-09-15 the API
- * refuses plaintext merchant writes and seals every successful response.
+ * plus the ids (`merchantId`, `encryptionKeyId`, `signingKeyId`) the API uses
+ * to look the key material up. All are required: since API version 2026-09-15
+ * the API refuses plaintext merchant writes and seals every successful response.
  */
 
 import {
@@ -99,7 +99,7 @@ export interface EnscClientConfig {
   /**
    * ENSC's Ed25519 public keys, keyed by key id, used to verify the signature
    * on every sealed response. When omitted the SDK fetches
-   * {@link PUBLIC_KEYS_PATH} from `baseUrl` once per process and caches it.
+   * {@link PUBLIC_KEYS_PATH} from `baseUrl` once per client and caches it.
    * Pin them here to remove that network dependency in locked-down deployments.
    */
   enscPublicKeys?: Record<string, string>;
@@ -253,6 +253,18 @@ export function resolveConfig(config: EnscClientConfig): ResolvedConfig {
   }
 
   const baseUrl = (config.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+  {
+    let parsed: URL;
+    try {
+      parsed = new URL(baseUrl);
+    } catch {
+      return fail('config.baseUrl must be an absolute URL');
+    }
+    const loopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
+      fail('config.baseUrl must use https (http is allowed for localhost only)');
+    }
+  }
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
   const responseMaxSkewSeconds = config.responseMaxSkewSeconds ?? DEFAULT_RESPONSE_MAX_SKEW_SECONDS;

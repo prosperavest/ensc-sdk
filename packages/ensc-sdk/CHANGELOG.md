@@ -3,6 +3,77 @@
 All notable changes to `@ensc/sdk` are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 0.4.1
+
+Requires API date version `2026-09-15` (unchanged).
+
+### Fixed
+
+- **`@ensc/sdk/web3`**: `signAndBroadcast` estimates gas first (without fee
+  fields) and sends with an explicit limit (estimate plus 30 percent, or the
+  `gas` you pass). Without a limit some nodes estimate at the block gas limit
+  and charge that gas up front during the simulation; on Celo that empties
+  the CELO balance the converter then pulls from, and a `crypto-issue` with
+  `pair: 'CELO'` failed with `transfer value exceeded balance of sender` from
+  any wallet holding less than a few CELO. A failed simulation now raises
+  `ENSC_UPSTREAM_FAILED` with the node's reason and broadcasts nothing.
+- **`@ensc/sdk/web3`**: the helper refuses a wallet key that is not the
+  `from` of the transaction, an RPC endpoint on another chain, and a voucher
+  whose `wallet` is not its transaction's signer.
+- **`EventDelivery`** now carries every field the API returns: `endpointId`,
+  `responseStatus`, `deliveredAt`, `nextAttemptAt`, `responseSnippet`; the
+  `status` union is documented. `EventDetail` gains `apiVersion` and
+  `dispatchedAt`.
+- **`webhookEndpoints.sendTest`** is typed (`SendTestEventResponse`), and its
+  doc comment no longer mentions a per-endpoint secret; deliveries are signed
+  with ENSC's published Ed25519 key.
+- README: the sentence about what ENSC retains was wrong; corrected. New
+  sections on unsigned transactions, amounts and decimals, and a complete
+  webhooks guide.
+
+- Every `EnscError` now carries `status` (the HTTP status received, so a
+  code added by the API later still classifies correctly) and `requestId`
+  (from the error body or `X-ENSC-Request-Id`).
+- An empty 2xx body is refused as `ENSC_INVALID_SIGNATURE` (`reason:
+  'empty_body'`): no route this client calls answers without a sealed
+  envelope, so a stripped body is treated like an unsigned one.
+- A polyfilled `fetch` that reports the timeout as `AbortError` is now
+  recognised as a timeout; a body that cannot be read is retried like a
+  network error.
+- Webhook verification: the timestamp is signed as the exact header string
+  (digits only), a byte body is hashed as received, a repeated header in a
+  Node `IncomingHttpHeaders` record is refused instead of thrown on, and a
+  verified body that is not an event envelope is refused by `constructEvent`.
+- `config.baseUrl` must be https (http is allowed for `localhost` only).
+- Type drift: `WebhookEndpoint` and `CreateWebhookEndpointResponse` gain
+  `apiVersion`; `EventSummary` gains `apiVersion` and `dispatchedAt` and its
+  `status` is the documented `EventOutboxStatus` (`created`, `in_flight`,
+  `dispatched`, `abandoned`); `SendTestEventResponse` gains `deliveredVia`;
+  `GetBalanceParams` requires `asset` or `contractAddress`.
+- CommonJS consumers get matching `.d.cts` declarations (`exports` now names
+  `types` per condition).
+
+### Added
+
+- **`Signer`**: `signAndBroadcast` and `executeVoucher` accept a raw private
+  key or any viem account (local, custody or KMS via `toAccount`, or the
+  JSON-RPC account of a connected wallet). A reverted converter call now
+  throws `ENSC_UPSTREAM_FAILED` with the hash instead of returning a result
+  to report as confirmed; receipt errors are wrapped the same way.
+- **`EnscClient.fetchPublicKeys()`** (also exported as
+  `fetchEnscPublicKeys`): loads ENSC's webhook keys as `{ [kid]: publicKey }`.
+  `verifyWebhookSignature` and `constructEvent` accept that map and pick the
+  key named by `X-ENSC-Key-Id`, so a key rotation needs no redeploy.
+- `arbitrum`, `bsc`, `mode` and their testnets `arbitrum-sepolia`, `bsc-testnet`, `mode-sepolia` in `KNOWN_CHAINS` (token-only chains in the registry).
+- `ListByEnvParams`: `apiKeys`, `signingKeys`, `encryptionKeys` and `origins`
+  `list()` accept an `env` filter, as the API does.
+- **`testEvents`** resource: `list()` (`GET /v1/test-data/events`, the
+  catalogue with a sample payload per type) and `emit({ eventType, overrides })`
+  (`POST /v1/test-data/events`, Sandbox only).
+- `UnsignedTransaction.from`: every piece of calldata now names the wallet
+  that must sign it (API change of 17 September 2026).
+- `BroadcastOptions.gas` and `BroadcastOptions.gasMarginPercent`.
+
 ## 0.4.0
 
 Breaking: the API moved from the direct mint / DEX redeem model to the ENSC

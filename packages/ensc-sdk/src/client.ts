@@ -37,10 +37,13 @@ import { EncryptionKeysResource } from './resources/encryption-keys.js';
 import { EventsResource } from './resources/events.js';
 import { OriginsResource } from './resources/origins.js';
 import { SigningKeysResource } from './resources/signing-keys.js';
+import { TestEventsResource } from './resources/test-events.js';
 import { TransferResource } from './resources/transfer.js';
 import { WebhookEndpointsResource } from './resources/webhook-endpoints.js';
 import {
   constructEvent,
+  type FetchPublicKeysOptions,
+  fetchEnscPublicKeys,
   type VerifyWebhookOptions,
   verifyWebhookSignature,
   type WebhookEvent,
@@ -55,6 +58,8 @@ export class EnscClient {
   readonly origins: OriginsResource;
   readonly webhookEndpoints: WebhookEndpointsResource;
   readonly events: EventsResource;
+  /** Sandbox-only synthetic events for exercising your webhook receiver. */
+  readonly testEvents: TestEventsResource;
 
   // ── Reads ───────────────────────────────────────────────────────────────
   readonly balance: BalanceResource;
@@ -79,6 +84,7 @@ export class EnscClient {
     this.origins = new OriginsResource(this.#http);
     this.webhookEndpoints = new WebhookEndpointsResource(this.#http);
     this.events = new EventsResource(this.#http);
+    this.testEvents = new TestEventsResource(this.#http);
 
     this.balance = new BalanceResource(this.#http);
     this.banks = new BanksResource(this.#http);
@@ -115,5 +121,14 @@ export class EnscClient {
    */
   static constructEvent<T = unknown>(opts: VerifyWebhookOptions): WebhookEvent<T> {
     return constructEvent<T>(opts);
+  }
+
+  /**
+   * Load ENSC's current webhook signing keys, `{ [kid]: publicKey }`, for
+   * `constructEvent` and `verifyWebhookSignature`. Cache the result and refetch
+   * when a delivery names a key id you do not hold.
+   */
+  static fetchPublicKeys(options?: FetchPublicKeysOptions): Promise<Record<string, string>> {
+    return fetchEnscPublicKeys(options);
   }
 }

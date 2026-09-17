@@ -31,10 +31,10 @@ A test key can never touch live resources and a live key can never touch test re
 
 - **Idempotency keys on every write.** Your retries then can never double-execute. The SDK does this by default.
 - **Clock accuracy.** Signatures and sealed responses are time-bound to 5 minutes; run NTP on the servers that call ENSC.
-- **Handle `ENSC_RATE_LIMITED`** (429) by backing off; the default limit is 600 requests per minute per key.
+- **Handle `ENSC_RATE_LIMITED`** (429) by backing off. The limits: 600 requests per minute and 10,000 per hour per key; 600 per minute per source IP on every route; 60 per minute per key on writes to the conversion, account-resolution and transfer routes; 120 per minute per source IP on the public routes (the key document, the OpenAPI documents and the reference page).
 - **Watch `expiresAt`** on rotated keys (`signingKeys.list()`, `apiKeys.list()`, `encryptionKeys.list()`) so a rotation is completed inside its 24-hour window.
 - **Pin `X-ENSC-API-Version`.** The SDK pins `2026-09-15`. Read the changelog before adopting a newer version.
 
 ## If a credential leaks
 
-Revoke it in the dashboard immediately (revocation takes effect within seconds), generate a replacement, deploy. Because responses are sealed to your signing key and writes need your encryption key, a leaked API key alone does not expose data or enable writes, but treat any leak as a rotation of all four credentials.
+Revoke it in the dashboard immediately (revocation takes effect within seconds), generate a replacement, deploy. Because responses are sealed to your signing key and writes need your encryption key, a leaked API key alone does not expose data or enable writes, but treat any leak as a rotation of all three secrets.

@@ -72,7 +72,16 @@ export type Pagination = z.infer<typeof paginationSchema>;
  * `gasLimit`/fees/nonce are the merchant's to fill (their signer knows the
  * account state); the API supplies the chain-independent part.
  */
+/**
+ * Calldata the merchant's wallet signs. `from` names the wallet that must
+ * sign it (the conversion's wallet, or the transfer's sender); `value` is
+ * always `'0'` because ENSC never asks for native value. Gas, fees and nonce
+ * are left to the signer. Estimate gas with an explicit limit: without one,
+ * some nodes charge the block gas limit up front during estimation, which on
+ * Celo drains the CELO balance a converter call then pulls from.
+ */
 export const unsignedTransactionSchema = z.object({
+  from: evmAddressSchema,
   to: evmAddressSchema,
   data: z.string().regex(/^0x[0-9a-fA-F]*$/),
   value: z.literal('0'),
@@ -405,6 +414,7 @@ export const conversionSchema = z.object({
   updatedAt: z.number().int(),
 });
 export type Conversion = z.infer<typeof conversionSchema>;
+export type ConversionStage = z.infer<typeof conversionStageSchema>;
 
 export const listConversionsResponseSchema = z.object({
   conversions: z.array(conversionSchema),

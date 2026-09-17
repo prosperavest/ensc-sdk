@@ -1,4 +1,3 @@
-import { signRequest } from '@ensc/protocol';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -132,9 +131,75 @@ describe('constructEvent', () => {
   });
 });
 
-// Sanity check that the SDK's request signing import surface is intact.
-describe('signing import surface', () => {
-  it('signRequest is reachable for advanced callers', () => {
-    expect(typeof signRequest).toBe('function');
+describe('key ids, bytes and Node-style headers', () => {
+  it('picks the key named by X-ENSC-Key-Id from a key map and refuses an unknown id', () => {
+    const { headers, body } = makeDelivery({ amount: '1' });
+    const keys = { whk_key_1: keypair.publicKey, other: keypair.publicKey };
+    expect(verifyWebhookSignature({ body, headers, publicKey: keys }).valid).toBe(true);
+    const rotated = { ...headers, 'X-ENSC-Key-Id': 'whk_key_9' };
+    expect(verifyWebhookSignature({ body, headers: rotated, publicKey: keys })).toEqual({
+      valid: false,
+      reason: 'unknown_key_id',
+    });
+  });
+
+  it('hashes a byte body as received and accepts lower-case Node headers', () => {
+    const { headers, body } = makeDelivery({ amount: '1' });
+    const nodeHeaders: Record<string, string | string[]> = {};
+    for (const [k, v] of Object.entries(headers)) nodeHeaders[k.toLowerCase()] = v;
+    const bytes = new TextEncoder().encode(body);
+    expect(
+      verifyWebhookSignature({ body: bytes, headers: nodeHeaders, publicKey: keypair.publicKey })
+        .valid,
+    ).toBe(true);
+    // A repeated signature header is refused rather than thrown on.
+    nodeHeaders['x-ensc-signature'] = [headers['X-ENSC-Signature'] ?? '', 'ed25519=zz'];
+    expect(
+      verifyWebhookSignature({ body: bytes, headers: nodeHeaders, publicKey: keypair.publicKey }),
+    ).toEqual({
+      valid: false,
+      reason: 'missing_signature',
+    });
+  });
+
+  it('signs the timestamp as the exact header string', () => {
+    const { headers, body } = makeDelivery({ amount: '1' });
+    const padded = { ...headers, 'X-ENSC-Timestamp': `${headers['X-ENSC-Timestamp']}abc` };
+    expect(verifyWebhookSignature({ body, headers: padded, publicKey: keypair.publicKey })).toEqual(
+      {
+        valid: false,
+        reason: 'missing_timestamp',
+      },
+    );
+  });
+
+  it('constructEvent refuses a verified body that is not an event envelope', () => {
+    const webhookId = 'whk_01TESTWEBHOOK';
+    const timestamp = Math.floor(Date.now() / 1000);
+    const body = JSON.stringify({ hello: 'world' });
+    const bodyHash = bytesToHex(sha256(new TextEncoder().encode(body)));
+    const canonical = `ENSC-WH-V1\n${webhookId}\n${timestamp}\n${bodyHash}`;
+    const sig = ed25519.sign(new TextEncoder().encode(canonical), fromB64Url(keypair.privateKey));
+    const headers = {
+      'X-ENSC-Signature': `ed25519=${toB64Url(sig)}`,
+      'X-ENSC-Timestamp': String(timestamp),
+      'X-ENSC-Webhook-Id': webhookId,
+    };
+    expect(() => constructEvent({ body, headers, publicKey: keypair.publicKey })).toThrow(
+      /not an ENSC event envelope/,
+    );
+  });
+
+  it('fetchEnscPublicKeys returns the webhook keys by id', async () => {
+    const doc = {
+      keys: [
+        { kid: 'k1', alg: 'Ed25519', publicKey: keypair.publicKey, use: ['webhooks', 'responses'] },
+        { kid: 'k2', alg: 'Ed25519', publicKey: keypair.publicKey, use: ['responses'] },
+      ],
+    };
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify(doc), { status: 200 })) as unknown as typeof fetch;
+    const keys = await EnscClient.fetchPublicKeys({ fetch: fetchImpl });
+    expect(keys).toEqual({ k1: keypair.publicKey });
   });
 });

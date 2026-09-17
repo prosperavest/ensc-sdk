@@ -39,6 +39,8 @@ export interface CreateWebhookEndpointResponse {
   url: string;
   description: string | null;
   eventTypes: string[];
+  /** The payload version deliveries to this endpoint use. */
+  apiVersion: string;
   status: 'active';
   createdAt: number;
 }
@@ -49,6 +51,8 @@ export interface WebhookEndpoint {
   url: string;
   description: string | null;
   eventTypes: string[];
+  /** The payload version deliveries to this endpoint use. */
+  apiVersion: string;
   status: WebhookEndpointStatus;
   createdAt: number;
 }
@@ -72,8 +76,23 @@ export interface RemoveWebhookEndpointResponse {
 export interface SendTestEventParams {
   /** Event type to synthesize. Defaults server-side to `synthetic.test_event`. */
   eventType?: string;
-  /** Arbitrary payload to include in the test event. */
+  /** Your own payload. Omit it to get the realistic sample for `eventType`. */
   payload?: Record<string, unknown>;
+}
+
+export interface SendTestEventResponse {
+  eventId: string;
+  endpointId: string;
+  eventType: string;
+  scheduled: boolean;
+  deliveredVia: string;
+  /**
+   * False when this endpoint does not subscribe to `eventType`; `warning` says
+   * so. The event is queued in the endpoint's environment and every active
+   * endpoint there that subscribes to the type receives it.
+   */
+  willDeliverToTargetEndpoint: boolean;
+  warning: string | null;
 }
 
 export interface ListWebhookEndpointsParams extends ListParams {
@@ -87,7 +106,10 @@ export class WebhookEndpointsResource {
     this.#http = http;
   }
 
-  /** Register a webhook endpoint. The `secret` in the response is shown once. */
+  /**
+   * Register a webhook endpoint: a public https URL on your backend. There is
+   * no per-endpoint secret; deliveries are signed with ENSC's published key.
+   */
   create(params: CreateWebhookEndpointParams): Promise<CreateWebhookEndpointResponse> {
     return this.#http.request<CreateWebhookEndpointResponse>({
       method: 'POST',
@@ -130,9 +152,15 @@ export class WebhookEndpointsResource {
     });
   }
 
-  /** Send a synthetic test event to an endpoint to verify the integration. */
-  sendTest(id: string, params: SendTestEventParams = {}): Promise<unknown> {
-    return this.#http.request<unknown>({
+  /**
+   * Queue a signed test event in this endpoint's environment. With an
+   * `eventType` from the catalogue and no `payload`, the delivery carries the
+   * fields a real event of that type carries. Every active endpoint in that
+   * environment subscribed to the type receives it. A Live endpoint accepts
+   * only `synthetic.test_event`.
+   */
+  sendTest(id: string, params: SendTestEventParams = {}): Promise<SendTestEventResponse> {
+    return this.#http.request<SendTestEventResponse>({
       method: 'POST',
       path: `/v1/webhook-endpoints/${encodeURIComponent(id)}/test`,
       body: params,

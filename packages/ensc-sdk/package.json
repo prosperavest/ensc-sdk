@@ -1,6 +1,6 @@
 {
   "name": "@ensc/sdk",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Official ENSC API client SDK: typed, server-side, with automatic request encryption, Ed25519 signing and sealed-response verification",
   "license": "Apache-2.0",
   "repository": {
@@ -14,14 +14,24 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./web3": {
-      "types": "./dist/web3/index.d.ts",
-      "import": "./dist/web3/index.js",
-      "require": "./dist/web3/index.cjs"
+      "import": {
+        "types": "./dist/web3/index.d.ts",
+        "default": "./dist/web3/index.js"
+      },
+      "require": {
+        "types": "./dist/web3/index.d.cts",
+        "default": "./dist/web3/index.cjs"
+      }
     }
   },
   "files": [

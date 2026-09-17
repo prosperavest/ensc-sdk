@@ -7,7 +7,7 @@
  */
 
 import type * as api from '@ensc/api-schemas';
-import type { HttpClient, ListParams } from '../http.js';
+import type { HttpClient, ListByEnvParams } from '../http.js';
 
 export class OriginsResource {
   readonly #http: HttpClient;
@@ -17,11 +17,11 @@ export class OriginsResource {
   }
 
   /** List allowed origins (cursor-paginated). */
-  list(params: ListParams = {}): Promise<api.ListAllowedOriginsResponse> {
+  list(params: ListByEnvParams = {}): Promise<api.ListAllowedOriginsResponse> {
     return this.#http.request<api.ListAllowedOriginsResponse>({
       method: 'GET',
       path: '/v1/origins',
-      query: { limit: params.limit, cursor: params.cursor },
+      query: { limit: params.limit, cursor: params.cursor, env: params.env },
     });
   }
 }

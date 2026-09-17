@@ -17,8 +17,8 @@ Conversions run on the converter chain of your environment: `celo-sepolia` with 
 
 ## The flow
 
-1. **Create.** `POST /v1/conversions` with the type, chain, the wallet that will sign, the amount and the type-specific fields. You may pass your own `reference` (`op:<type>:<hex>`, 8 to 64 hex characters or dashes after the type, so a UUID fits); otherwise ENSC mints one. Re-posting a reference you already used returns the existing conversion unchanged (200), so a retried create can never double-issue.
-2. **Sign.** The response carries `voucher`: the signed authorisation, an optional `approvalTransaction` (an ERC-20 `approve` to the converter, needed when the converter must pull a token from your wallet) and `transaction` (the converter call). Both are `{ to, data, value: "0", chainId }`; your signer fills gas, fees and nonce. Send the approval first when it is present, wait for it, then send the transaction. The voucher is bound to the wallet you named and expires at `voucher.expiresAt` (about ten minutes); a transaction sent by another wallet or after the deadline reverts.
+1. **Create.** `POST /v1/conversions` with the type, chain, the wallet that will sign, the amount and the type-specific fields. You may pass your own `reference` (`op:<type>:<hex>`, 8 to 64 hex characters or dashes after the type, so a UUID fits); otherwise ENSC mints one. Re-posting a reference you already used returns the existing conversion (200), so a retried create can never double-issue. If the first attempt was cut off between the insert and the voucher (a timeout, a signer or bank-rail error), the conversion is `created` with `lastError` set, and re-posting the reference finishes it.
+2. **Sign.** The response carries `voucher`: the signed authorisation, an optional `approvalTransaction` (an ERC-20 `approve` to the converter, needed when the converter must pull a token from your wallet) and `transaction` (the converter call). Both are `{ from, to, data, value: "0", chainId }`: `from` is the wallet that must sign, `to` the token or the converter, `value` always `"0"`. Your signer fills gas, fees and nonce; estimate gas with an explicit limit (see [Signing the calldata](#signing-the-calldata)). Send the approval first when it is present, wait for it, then send the transaction. The voucher is bound to the wallet you named and expires at `voucher.expiresAt` (about ten minutes); a transaction sent by another wallet or after the deadline reverts.
 3. **Report.** Tell ENSC what happened: `ensc.conversions.events.submitted(reference, txHash)` once broadcast (optional but recommended), `ensc.conversions.events.confirmed(reference, txHash)` once mined, or `ensc.conversions.events.failed(reference, error)` if your wallet could not send it. On `confirmed`, ENSC fetches the receipt and verifies that it succeeded, that ENSC moved to or from your wallet, and that the converter emitted the event for exactly this conversion. Crypto legs and `fiat-issue` then reach `succeeded`; a `fiat-redeem` moves on to the payout.
 
 ```ts
@@ -41,12 +41,27 @@ const settled = await ensc.conversions.events.confirmed(c.reference, transaction
 
 `executeVoucher` and `signAndBroadcast` are conveniences; any EVM signer works with the calldata. Whatever you use, the wallet key never goes to ENSC.
 
+### Signing the calldata
+
+With your own signer, for each of `approvalTransaction` (when present) and `transaction`:
+
+1. Check `chainId` against the chain your RPC endpoint serves, and `from` against the account you are signing with. The voucher is bound to that wallet.
+2. Estimate gas first, and send with an explicit gas limit (the estimate plus a margin). Without a limit some nodes estimate at the block gas limit and charge that much gas up front during the simulation. On Celo the native balance is also the CELO ERC-20 balance, so a `crypto-issue` with `pair: "CELO"` then reverts in simulation with `transfer value exceeded balance of sender` unless the wallet holds several CELO more than the amount. `@ensc/sdk/web3` does this for you.
+3. If the simulation fails, broadcast nothing and report `events.failed(reference, error)` so the conversion does not linger.
+4. Send `value: 0`. ENSC never asks for native value.
+
+### Amounts and decimals
+
+Amounts you send are decimal strings in the asset's own units: `"0.1"` CELO, `"100"` USDC, `"1000.00"` NGN. Fiat amounts take at most 2 decimals; a crypto amount may not carry more decimals than the asset has (`ENSC_VALIDATION_FAILED` otherwise). No commas, signs or exponents.
+
+Amounts ENSC returns are base-unit integer strings (`amountIn`, `amountOut`, `balance`, the voucher fields) with a decimal twin already divided by the asset's decimals (`amountInFormatted`, `amountOutFormatted`, `formatted`). Decimals: ENSC 18, CELO 18, USDC and USDT 6. NGN legs are stored as ENSC units (18 decimals) with the Naira principal in `fiatAmountNgn` (2 decimals). Do arithmetic on the base units with an arbitrary-precision integer, never on the formatted strings and never in floating point.
+
 ### Type-specific fields
 
 - `crypto-issue`, `crypto-redeem`: `pair` (`USDC`, `USDT`, `CELO`). The pair must be listed on the converter of the chain you name.
 - `fiat-issue`: `payer` with `email` (required) and optional `name` and `phone`; the payment rail needs a contact for the collection.
 - `fiat-redeem`: `payout` with `bankCode`, `accountNumber` (10 digits) and `accountName`. Resolve the account first with `POST /v1/accounts/resolve` (`ensc.accounts.resolve({ bankCode, accountNumber })`) and pass back the name it returns; the create refuses a name that does not match the bank record (`ENSC_ACCOUNT_RESOLUTION_FAILED`). Bank codes come from `GET /v1/banks` (`ensc.banks.list()`).
-- Any type: `counterparty` (`type` `individual` or `company`, `name`, `wallet`) for transaction screening, and `metadata` (up to 16 string keys, key up to 40 and value up to 200 characters) echoed back on the conversion and in webhooks.
+- Any type: `counterparty` (`type` `individual` or `company`, `name`, `wallet`) for transaction screening, and `metadata` (up to 16 string keys, key up to 40 and value up to 200 characters) echoed back on the conversion object (webhook payloads carry the summary only).
 
 ## Paying in Naira (`fiat-issue`)
 
@@ -127,7 +142,7 @@ Register an endpoint from the dashboard or with `ensc.webhookEndpoints.create()`
 | `conversion.payment_confirmed` | `fiat-issue`: the bank transfer arrived and was verified |
 | `conversion.voucher_issued` | A voucher is available (also after a hold is lifted or a re-issue) |
 | `conversion.onchain_confirmed` | ENSC verified your transaction receipt |
-| `conversion.settled` | ENSC's chain indexer independently saw the ENSC movement for your transaction; `data` adds `chainId`, `movement` (`mint`, `burn` or `transfer`), `amount`, `from`, `to` and `blockNumber` |
+| `conversion.settled` | ENSC independently saw the ENSC movement for your transaction on chain; `data` here is `id`, `reference`, `type`, `status`, `chain`, `chainId`, `txHash`, `movement` (`mint`, `burn` or `transfer`), `amount`, `from`, `to` and `blockNumber` |
 | `conversion.succeeded` | Done |
 | `conversion.failed` | Declined by screening, reported failed by you, or the bank transfer failed |
 | `conversion.requires_manual_review` | Something needs a person at ENSC: a short payment, a payout that could not be completed, a destination mismatch |
@@ -135,7 +150,7 @@ Register an endpoint from the dashboard or with `ensc.webhookEndpoints.create()`
 | `payout.succeeded` | `fiat-redeem`: the bank confirmed it |
 | `payout.failed` | `fiat-redeem`: the payout failed; the conversion is in manual review |
 
-In Sandbox, `POST /v1/test-data/events` emits any of these with a synthetic payload so you can exercise your receiver end to end.
+How to receive, verify and process these is in [Webhooks](./webhooks.md). In Sandbox, `POST /v1/webhook-endpoints/{id}/test` and `POST /v1/test-data/events` emit any of these with a realistic payload so you can exercise your receiver end to end.
 
 ## Error codes
 
@@ -146,7 +161,7 @@ Beyond the authentication and validation codes in [Authorization](./authorizatio
 | `ENSC_INVALID_CHAIN` | 400 | Unknown chain, or not available to your environment |
 | `ENSC_CONVERTER_UNAVAILABLE` | 400 | The chain has no converter; conversions run on `celo` / `celo-sepolia` |
 | `ENSC_INVALID_ASSET` | 400 | The pair is not listed on that chain |
-| `ENSC_INVALID_REFERENCE` | 400 | `reference` is not `op:<type>:<hex>` for this type |
+| `ENSC_VALIDATION_FAILED` | 400 | `reference` is not `op:<type>:<hex>` for this type (reported under `details.fields`) |
 | `ENSC_REFERENCE_CONFLICT` | 409 | Another account already used this reference |
 | `ENSC_AMOUNT_TOO_SMALL` | 400 | Zero, or below the NGN 100 payout minimum |
 | `ENSC_RATE_STALE` | 409 | The oracle rate is too old to price the leg; retry later |
