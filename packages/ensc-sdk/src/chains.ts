@@ -18,7 +18,16 @@
  */
 
 /** Mainnet chains ENSC can be deployed to. */
-export const MAINNET_CHAINS = ['celo', 'base', 'polygon', 'optimism', 'ethereum'] as const;
+export const MAINNET_CHAINS = [
+  'celo',
+  'base',
+  'polygon',
+  'optimism',
+  'ethereum',
+  'arbitrum',
+  'bsc',
+  'mode',
+] as const;
 
 /** Testnet chains ENSC can be deployed to. */
 export const TESTNET_CHAINS = [
@@ -27,6 +36,9 @@ export const TESTNET_CHAINS = [
   'polygon-amoy',
   'optimism-sepolia',
   'sepolia',
+  'arbitrum-sepolia',
+  'bsc-testnet',
+  'mode-sepolia',
 ] as const;
 
 /** Every chain slug the SDK knows about at build time. */

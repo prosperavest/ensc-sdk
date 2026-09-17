@@ -94,12 +94,13 @@ where `body` is the raw response body exactly as received. Do not parse the body
 
 | Code | Meaning |
 |---|---|
-| `ENSC_INVALID_SIGNATURE` | Missing headers (an unsealed 2xx), unknown key id, malformed or failed signature, or timestamp outside the window |
+| `ENSC_INVALID_SIGNATURE` | Missing headers or an empty body (an unsealed 2xx), unknown ENSC key id, malformed or failed signature, or timestamp outside the window |
 | `ENSC_DECRYPTION_FAILED` | The envelope is malformed or does not open with your signing key (usually a mismatched `signingKeyId` / `signingPrivateKey` pair) |
+| `ENSC_UPSTREAM_FAILED` | Network error or timeout, an unreadable body, or a non-ENSC answer from a gateway; `status` carries the HTTP status when there was one |
 
 ## Which key does ENSC seal to?
 
-The signing key named by the `X-ENSC-Key-Id` header on your request. Writes always carry it; send it on reads too. If you omit it on a read and have exactly one usable signing key, ENSC uses that one; with several, it answers `ENSC_MISSING_PUBLIC_KEY` and asks you to state the key.
+The signing key named by the `X-ENSC-Key-Id` header on your request. Writes always carry it; send it on reads too. If you omit it on a read and have exactly one usable signing key, ENSC uses that one; with several, it answers `ENSC_MISSING_PUBLIC_KEY` and asks you to state the key. A key id that is not one of your keys is `ENSC_MISSING_PUBLIC_KEY` on reads and writes alike.
 
 ## Reference implementation
 

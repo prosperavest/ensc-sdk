@@ -11,16 +11,17 @@ import type { HttpClient } from '../http.js';
 /** A whitelisted asset symbol the balance endpoint accepts. */
 export type BalanceAsset = Asset;
 
-export interface GetBalanceParams {
+interface GetBalanceBase {
   /** EVM address to read the balance of. */
   account: string;
   /** Chain to read from (must belong to the key's environment). */
   chain: ChainInput;
-  /** Asset symbol; supply this or `contractAddress`. */
-  asset?: BalanceAsset;
-  /** Raw token contract address; supply this or `asset`. */
-  contractAddress?: string;
 }
+
+/** Either an asset symbol or a token contract address, never neither. */
+export type GetBalanceParams =
+  | (GetBalanceBase & { asset: BalanceAsset; contractAddress?: undefined })
+  | (GetBalanceBase & { contractAddress: string; asset?: undefined });
 
 export class BalanceResource {
   readonly #http: HttpClient;

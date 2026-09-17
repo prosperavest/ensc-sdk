@@ -1,6 +1,6 @@
 # Generating keys
 
-You need four credentials per environment to call the ENSC API. The dashboard issues them together.
+You need three secrets and three identifiers per environment to call the ENSC API. The dashboard issues them together.
 
 ## Before you start
 
@@ -10,7 +10,7 @@ You need four credentials per environment to call the ENSC API. The dashboard is
 ## Steps
 
 1. Sign in to the dashboard and choose **Sandbox** or **Live**.
-2. Open **API keys** and click **Generate keys**.
+2. Open the **Credentials** tab and click **Generate keys**.
 3. For Live, enter the IP addresses or CIDR ranges your servers call ENSC from (up to 32).
 4. The dashboard creates your API key, your encryption key and an Ed25519 signing keypair, registers the public half with ENSC, and shows the six values **once**:
 
@@ -23,7 +23,7 @@ ENSC_SIGNING_KEY_ID=sig_…
 ENSC_SIGNING_PRIVATE_KEY=…       # 43 characters, base64url
 ```
 
-5. Store them in your secret manager or environment. Close the dialog only when you have saved all six; they cannot be shown again.
+5. Click **Download .env** (or **Copy as .env**) and store the values in your secret manager or environment, then tick **I have stored these values**. They cannot be shown again.
 
 ## Using them
 

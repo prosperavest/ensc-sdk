@@ -23,6 +23,7 @@ describe('EnscClient construction', () => {
       'origins',
       'webhookEndpoints',
       'events',
+      'testEvents',
       'balance',
       'banks',
       'conversions',
@@ -145,10 +146,29 @@ describe('HttpClient transport', () => {
     expect(srv.calls).toHaveLength(2);
   });
 
-  it('returns undefined for a 204', async () => {
+  it('refuses an empty 2xx: every successful answer must be a sealed envelope', async () => {
     const srv = testServer(() => ({ status: 204 }));
-    const res = await srv.client.webhookEndpoints.remove('whe_x');
-    expect(res).toBeUndefined();
+    await expect(srv.client.webhookEndpoints.remove('whe_x')).rejects.toMatchObject({
+      code: 'ENSC_INVALID_SIGNATURE',
+      details: { reason: 'empty_body' },
+    });
+  });
+
+  it('carries the request id and the real HTTP status on errors', async () => {
+    const srv = testServer(
+      () => ({
+        status: 418,
+        unsealed: true,
+        headers: { 'X-ENSC-Request-Id': 'req_teapot' },
+        body: { error: { code: 'ENSC_VALIDATION_FAILED', message: 'no', requestId: 'req_teapot' } },
+      }),
+      { config: { maxRetries: 0 } },
+    );
+    await expect(srv.client.events.get('evt_x')).rejects.toMatchObject({
+      code: 'ENSC_VALIDATION_FAILED',
+      status: 418,
+      requestId: 'req_teapot',
+    });
   });
 
   it('maps a non-ENSC gateway error by status', async () => {

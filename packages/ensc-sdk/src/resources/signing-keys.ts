@@ -11,7 +11,7 @@
  */
 
 import type * as api from '@ensc/api-schemas';
-import type { HttpClient, ListParams } from '../http.js';
+import type { HttpClient, ListByEnvParams } from '../http.js';
 
 /** One entry in the signing-keys list. */
 export interface SigningKeySummary {
@@ -38,11 +38,11 @@ export class SigningKeysResource {
   }
 
   /** List registered signing keys (cursor-paginated). */
-  list(params: ListParams = {}): Promise<ListSigningKeysResponse> {
+  list(params: ListByEnvParams = {}): Promise<ListSigningKeysResponse> {
     return this.#http.request<ListSigningKeysResponse>({
       method: 'GET',
       path: '/v1/signing-keys',
-      query: { limit: params.limit, cursor: params.cursor },
+      query: { limit: params.limit, cursor: params.cursor, env: params.env },
     });
   }
 }

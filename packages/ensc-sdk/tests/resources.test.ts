@@ -187,6 +187,20 @@ describe('resource routing, management', () => {
     expect(calls[2]?.url).toContain('/v1/webhook-endpoints/whe_1/test');
   });
 
+  it('testEvents.list → GET /v1/test-data/events, testEvents.emit → POST with the typed body', async () => {
+    const { client, calls } = recordingClient();
+    await client.testEvents.list();
+    await client.testEvents.emit({ eventType: 'payout.failed', overrides: { amountNgn: '5.00' } });
+    expect(calls[0]).toMatchObject({ method: 'GET' });
+    expect(calls[0]?.url).toContain('/v1/test-data/events');
+    expect(calls[1]).toMatchObject({ method: 'POST' });
+    expect(calls[1]?.url).toContain('/v1/test-data/events');
+    expect(JSON.parse(calls[1]?.body ?? '{}')).toEqual({
+      eventType: 'payout.failed',
+      overrides: { amountNgn: '5.00' },
+    });
+  });
+
   it('exposes no credential-issuance methods (dashboard-only on the API)', () => {
     const { client } = recordingClient();
     const has = (o: object, k: string) =>

@@ -8,7 +8,7 @@
  */
 
 import type * as api from '@ensc/api-schemas';
-import type { HttpClient, ListParams } from '../http.js';
+import type { HttpClient, ListByEnvParams } from '../http.js';
 
 export class EncryptionKeysResource {
   readonly #http: HttpClient;
@@ -18,11 +18,11 @@ export class EncryptionKeysResource {
   }
 
   /** List encryption keys (cursor-paginated). */
-  list(params: ListParams = {}): Promise<api.ListEncryptionKeysResponse> {
+  list(params: ListByEnvParams = {}): Promise<api.ListEncryptionKeysResponse> {
     return this.#http.request<api.ListEncryptionKeysResponse>({
       method: 'GET',
       path: '/v1/encryption-keys',
-      query: { limit: params.limit, cursor: params.cursor },
+      query: { limit: params.limit, cursor: params.cursor, env: params.env },
     });
   }
 }

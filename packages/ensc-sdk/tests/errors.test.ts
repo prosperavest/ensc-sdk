@@ -47,8 +47,8 @@ describe('isEnscError', () => {
 
 describe('isEnscErrorCode', () => {
   it('matches the specific code', () => {
-    const err = new EnscError('ENSC_MINT_LIMIT_EXCEEDED', 'too much');
-    expect(isEnscErrorCode(err, 'ENSC_MINT_LIMIT_EXCEEDED')).toBe(true);
+    const err = new EnscError('ENSC_RESERVE_INSUFFICIENT', 'too much');
+    expect(isEnscErrorCode(err, 'ENSC_RESERVE_INSUFFICIENT')).toBe(true);
     expect(isEnscErrorCode(err, 'ENSC_RATE_LIMITED')).toBe(false);
   });
 

@@ -184,17 +184,32 @@ export const ERROR_STATUS: Record<EnscErrorCode, number> = {
   ENSC_JWKS_UNAVAILABLE: 503,
 };
 
+export interface EnscErrorExtra {
+  /** HTTP status actually received, when it differs from the code's default. */
+  status?: number | undefined;
+  /** The `X-ENSC-Request-Id` of the failed call; quote it to support. */
+  requestId?: string | undefined;
+}
+
 export class EnscError extends Error {
   readonly code: EnscErrorCode;
   readonly status: number;
   readonly details?: Record<string, unknown>;
+  readonly requestId?: string;
 
-  constructor(code: EnscErrorCode, message: string, details?: Record<string, unknown>) {
+  constructor(
+    code: EnscErrorCode,
+    message: string,
+    details?: Record<string, unknown>,
+    extra?: EnscErrorExtra,
+  ) {
     super(message);
     this.name = 'EnscError';
     this.code = code;
-    this.status = ERROR_STATUS[code];
+    // A code the API added after this client was built still gets a status.
+    this.status = extra?.status ?? ERROR_STATUS[code] ?? 500;
     if (details !== undefined) this.details = details;
+    if (extra?.requestId !== undefined) this.requestId = extra.requestId;
   }
 
   toJSON(requestId?: string): EnscErrorResponse {

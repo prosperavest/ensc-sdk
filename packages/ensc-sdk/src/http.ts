@@ -27,7 +27,7 @@ export type QueryParams = Record<string, QueryValue>;
 
 export interface RequestOptions {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  /** Path including the `/v1` prefix, e.g. `/v1/mint`. */
+  /** Path including the `/v1` prefix, e.g. `/v1/conversions`. */
   path: string;
   query?: QueryParams;
   /** JSON-serializable request body. */
@@ -43,10 +43,16 @@ export interface RequestOptions {
 
 /** Shared cursor-pagination input for every `list()` method. */
 export interface ListParams {
-  /** Page size, 1–200. The API defaults to 50. */
+  /** Page size, 1 to 200. The API defaults to 50. */
   limit?: number;
   /** Opaque cursor from a previous response's `pagination.nextCursor`. */
   cursor?: string;
+}
+
+/** Pagination plus an environment filter, for the credential and origin lists. */
+export interface ListByEnvParams extends ListParams {
+  /** Restrict to one environment; the default is both. */
+  env?: 'test' | 'live';
 }
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -156,8 +162,10 @@ export class HttpClient {
           signal: AbortSignal.timeout(cfg.timeoutMs),
         });
       } catch (err) {
-        // Network-level failure - no HTTP response was produced.
-        const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+        // Network-level failure - no HTTP response was produced. A polyfilled
+        // fetch reports the timeout signal as AbortError.
+        const isTimeout =
+          err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
         lastError = new EnscError(
           'ENSC_UPSTREAM_FAILED',
           isTimeout
@@ -171,17 +179,37 @@ export class HttpClient {
         throw lastError;
       }
 
-      // 204 / empty body - nothing to parse.
-      if (response.status === 204) {
-        return undefined as T;
+      const requestId = response.headers.get('X-ENSC-Request-Id') ?? undefined;
+      let raw: string;
+      try {
+        raw = await response.text();
+      } catch (err) {
+        lastError = new EnscError(
+          'ENSC_UPSTREAM_FAILED',
+          `Response body from ${opts.path} could not be read: ${(err as Error).message}`,
+          undefined,
+          { requestId },
+        );
+        if (attempt < cfg.maxRetries) {
+          await sleep(retryDelayMs(attempt));
+          continue;
+        }
+        throw lastError;
       }
-
-      const raw = await response.text();
 
       if (response.ok) {
         // Every successful body is sealed to our signing key and signed by
-        // ENSC. Nothing is parsed before the signature verifies.
-        if (raw.length === 0) return undefined as T;
+        // ENSC. Nothing is parsed before the signature verifies, and no route
+        // this client calls answers an empty 2xx, so an empty body is refused
+        // like any other unsigned answer.
+        if (response.status === 204 || raw.length === 0) {
+          throw new EnscError(
+            'ENSC_INVALID_SIGNATURE',
+            `Response from ${opts.path} has no sealed body`,
+            { reason: 'empty_body', status: response.status },
+            { requestId },
+          );
+        }
         const plaintext = await openSealedResponse(cfg, this.#keys, {
           body: raw,
           headers: response.headers,
@@ -197,7 +225,7 @@ export class HttpClient {
       }
 
       // Error response - prefer the API's structured ENSC error body.
-      const enscError = toEnscError(response.status, parsed);
+      const enscError = toEnscError(response.status, parsed, requestId);
       lastError = enscError;
 
       // Retry only transient server-side failures.
@@ -228,18 +256,40 @@ function retryDelayMs(attempt: number): number {
   return 200 * 2 ** attempt;
 }
 
-/** Map an HTTP error response to an `EnscError`. */
-function toEnscError(status: number, body: unknown): EnscError {
+/** Map an HTTP error response to an `EnscError`, keeping the real status and request id. */
+function toEnscError(status: number, body: unknown, headerRequestId?: string): EnscError {
   if (isEnscErrorResponse(body)) {
-    const err = new EnscError(body.error.code, body.error.message, body.error.details);
-    return err;
+    const requestId = body.error.requestId ?? headerRequestId;
+    return new EnscError(body.error.code, body.error.message, body.error.details, {
+      status,
+      requestId,
+    });
   }
   // The API always returns the ENSC error shape; reaching here means an
   // unexpected upstream (proxy, gateway). Map by status as best we can.
-  if (status === 429) return new EnscError('ENSC_RATE_LIMITED', 'Rate limited');
-  if (status === 404) return new EnscError('ENSC_NOT_FOUND', 'Not found');
-  if (status >= 500) {
-    return new EnscError('ENSC_UPSTREAM_FAILED', `Upstream returned HTTP ${status}`);
+  const extra = { status, requestId: headerRequestId };
+  if (status === 429) return new EnscError('ENSC_RATE_LIMITED', 'Rate limited', undefined, extra);
+  if (status === 404) return new EnscError('ENSC_NOT_FOUND', 'Not found', undefined, extra);
+  if (status === 401 || status === 403) {
+    return new EnscError(
+      'ENSC_FORBIDDEN',
+      `Request refused upstream with HTTP ${status}`,
+      undefined,
+      extra,
+    );
   }
-  return new EnscError('ENSC_INTERNAL', `Unexpected HTTP ${status} response`);
+  if (status >= 500) {
+    return new EnscError(
+      'ENSC_UPSTREAM_FAILED',
+      `Upstream returned HTTP ${status}`,
+      undefined,
+      extra,
+    );
+  }
+  return new EnscError(
+    'ENSC_UPSTREAM_FAILED',
+    `Unexpected HTTP ${status} response`,
+    undefined,
+    extra,
+  );
 }

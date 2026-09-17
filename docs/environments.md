@@ -26,26 +26,25 @@ Conversions run on one converter chain per environment:
 
 The wallet you name on a conversion must hold the token it sends and enough native CELO for gas on that chain. `GET /v1/balance` reads any whitelisted asset on any enabled chain of your environment.
 
-Other chains in the registry (`base`, `polygon`, `optimism`, `ethereum` and their testnets) carry the ENSC token only: `balance` and `transfer` work where ENSC is deployed, and `POST /v1/conversions` answers `ENSC_CONVERTER_UNAVAILABLE`.
+Other chains in the registry (`base`, `polygon`, `optimism`, `ethereum`, `arbitrum`, `bsc`, `mode` and their testnets `base-sepolia`, `polygon-amoy`, `optimism-sepolia`, `sepolia`, `arbitrum-sepolia`, `bsc-testnet`, `mode-sepolia`) carry the ENSC token only: `balance` and `transfer` work where ENSC is deployed and the chain is enabled for your environment, and `POST /v1/conversions` answers `ENSC_CONVERTER_UNAVAILABLE`.
 
 ## The sandbox bank rail
 
-In Sandbox, `GET /v1/banks`, `POST /v1/accounts/resolve`, `fiat-issue` collections and `fiat-redeem` payouts go to the bank rail's sandbox instead of the live banking network. No real money moves. The sandbox has fixed conventions:
+In Sandbox, `GET /v1/banks`, `POST /v1/accounts/resolve`, `fiat-issue` collections and `fiat-redeem` payouts go to a sandbox banking network instead of the live one. No real money moves.
 
-- **Test bank**: bank code `044`.
-- **Test accounts**: `0690000031` to `0690000041` simulate payouts. `0690000036` is the blacklisted account: a payout to it fails, which is how you exercise the `payout.failed` / `conversion.requires_manual_review` path.
-- **Payout outcomes** are driven by a suffix on the transfer reference the rail receives: `_PMCK` succeeds, `_PMCK_ST_F` fails, and `DU_<n>` delays the outcome by `n` minutes. ENSC sends every Sandbox payout with the suffix `_PMCKDU_1`, so a Sandbox `fiat-redeem` to a test account succeeds about one minute after `payout.initiated`, and you see the full `payout_pending` → `payout_in_progress` → `payout_confirmed` → `succeeded` sequence. You cannot choose another suffix through the API; use the blacklisted account for the failure path.
-- **Bank transfer only**: the sandbox account, like the live one, has no cards or USSD enabled. `paymentInstructions` on a Sandbox `fiat-issue` describe a sandbox account; the transfer amount and expiry are real values from the rail's sandbox.
+- Use the test bank and the test account numbers shown on the dashboard's Sandbox page. One of them always fails, which is how you exercise the `payout.failed` and `conversion.requires_manual_review` path.
+- A Sandbox `fiat-redeem` to a test account succeeds about one minute after `payout.initiated`, so you see the full `payout_pending`, `payout_in_progress`, `payout_confirmed`, `succeeded` sequence.
+- Bank transfer only: `paymentInstructions` on a Sandbox `fiat-issue` describe a sandbox account; the transfer amount and expiry are real values.
 
 `accountName` on a `fiat-redeem` must still match what `accounts/resolve` returns for the test account.
 
 ## Screening
 
-Transaction screening applies in both environments with the same statuses and holds. On Sandbox the chain is a testnet, so no wallet analytics run on the counterparty wallet; screening otherwise behaves as on Live.
+Transaction screening applies in both environments; screening statuses and holds behave on Sandbox as they do on Live.
 
 ## Exercising webhooks
 
-`POST /v1/test-data/events` (any key) writes a synthetic event of the type you name into your Sandbox webhook stream with a realistic payload, delivered and signed exactly like a real one. Use it to test every `conversion.*` and `payout.*` handler before you can produce the real event. Sandbox events are only ever delivered to Sandbox endpoints.
+`POST /v1/test-data/events` (`ensc.testEvents.emit`, with your Sandbox or Live key) writes a synthetic event of the type you name into your Sandbox webhook stream with a realistic payload, delivered and signed exactly like a real one. Use it to test every `conversion.*` and `payout.*` handler before you can produce the real event. Synthetic events are always Sandbox events and are only ever delivered to Sandbox endpoints. `POST /v1/webhook-endpoints/{id}/test` (`ensc.webhookEndpoints.sendTest`) queues one event in that endpoint's environment instead of the whole Sandbox stream. The full receiver guide is [Webhooks](./webhooks.md).
 
 ## Moving to Live
 

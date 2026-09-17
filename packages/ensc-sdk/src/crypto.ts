@@ -46,7 +46,7 @@ export const RESPONSE_HEADERS = {
 
 export interface EncryptRequestInput {
   method: string;
-  /** Path as the server sees it, without query string, e.g. `/v1/mint`. */
+  /** Path as the server sees it, without query string, e.g. `/v1/conversions`. */
   path: string;
   /** Serialized JSON body. */
   plaintext: string;

@@ -4,7 +4,7 @@ Every call between your server and ENSC is protected by three independent layers
 
 ## Your credentials
 
-When you generate keys in the dashboard you receive four credentials for each environment (Sandbox, Live):
+When you generate keys in the dashboard you receive three secrets, with their identifiers, for each environment (Sandbox, Live):
 
 | Credential | Secret | What it does |
 |---|---|---|
@@ -56,13 +56,13 @@ If you suspect any credential has leaked, rotate it from the dashboard. Rotation
 
 ## Your wallet key stays yours
 
-ENSC never holds or asks for a wallet private key. Every on-chain action (a conversion, a transfer) is returned as unsigned calldata, `{ to, data, value: "0", chainId }`, that your own wallet signs and broadcasts. Conversions are additionally gated by a voucher that ENSC signs for the exact wallet, amounts and deadline you asked for; the converter contract refuses a voucher presented by any other wallet, reused, or presented after its deadline. See [Conversions](./conversions.md).
+ENSC never holds or asks for a wallet private key. Every on-chain action (a conversion, a transfer) is returned as unsigned calldata, `{ from, to, data, value: "0", chainId }`, that your own wallet signs and broadcasts. Conversions are additionally gated by a voucher that ENSC signs for the exact wallet, amounts and deadline you asked for; the converter contract refuses a voucher presented by any other wallet, reused, or presented after its deadline. See [Conversions](./conversions.md).
 
 Bank account details you give for a payout are stored encrypted; ENSC's responses and webhooks show only the last four digits. A payout is sent only to the account your conversion committed to on chain.
 
 ## Webhooks
 
-Webhooks ENSC sends to you are signed with the same Ed25519 key that signs responses. Verify them with `EnscClient.constructEvent()` and the key from `/v1/.well-known/ensc-public-keys.json` before acting on a delivery. Webhook payloads never carry bank account numbers.
+Webhooks ENSC sends to you are signed with the same Ed25519 key that signs responses, over the webhook id, the timestamp and the SHA-256 of the raw body (`ENSC-WH-V1`). There is no shared secret to store or rotate. Verify them with `EnscClient.constructEvent()` and the key from `/v1/.well-known/ensc-public-keys.json` before acting on a delivery, and de-duplicate on the event id. Webhook payloads never carry bank account numbers. The receiver guide is [Webhooks](./webhooks.md).
 
 ## Where this is implemented
 

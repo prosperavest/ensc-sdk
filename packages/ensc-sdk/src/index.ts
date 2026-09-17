@@ -54,7 +54,7 @@ export {
 } from './errors.js';
 
 // ── List / pagination input ───────────────────────────────────────────────
-export type { ListParams } from './http.js';
+export type { ListByEnvParams, ListParams } from './http.js';
 export type { ResolveAccountParams } from './resources/accounts.js';
 export type { BalanceAsset, GetBalanceParams } from './resources/balance.js';
 export type {
@@ -81,6 +81,7 @@ export type {
   EventDelivery,
   EventDetail,
   EventEnv,
+  EventOutboxStatus,
   EventSummary,
   ListEventsParams,
   ListEventsResponse,
@@ -90,6 +91,12 @@ export type {
   ListSigningKeysResponse,
   SigningKeySummary,
 } from './resources/signing-keys.js';
+export type {
+  EmitTestEventParams,
+  EmitTestEventResponse,
+  ListTestEventsResponse,
+  TestEventTemplate,
+} from './resources/test-events.js';
 export type { TransferParams } from './resources/transfer.js';
 export type {
   CreateWebhookEndpointParams,
@@ -98,6 +105,7 @@ export type {
   ListWebhookEndpointsResponse,
   RemoveWebhookEndpointResponse,
   SendTestEventParams,
+  SendTestEventResponse,
   UpdateWebhookEndpointParams,
   UpdateWebhookEndpointResponse,
   WebhookEndpoint,
@@ -107,6 +115,8 @@ export type {
 // ── Webhooks (for receivers) ──────────────────────────────────────────────
 export {
   constructEvent,
+  type FetchPublicKeysOptions,
+  fetchEnscPublicKeys,
   type VerifyWebhookOptions,
   verifyWebhookSignature,
   type WebhookEvent,
