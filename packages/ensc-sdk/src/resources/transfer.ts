@@ -7,8 +7,8 @@
  */
 
 import type * as api from '@ensc/api-schemas';
+import type { HttpClient } from '@ensc/sdk-core';
 import type { ChainInput } from '../chains.js';
-import type { HttpClient } from '../http.js';
 
 export interface TransferParams {
   /** Sender EVM address (the wallet that will sign). */

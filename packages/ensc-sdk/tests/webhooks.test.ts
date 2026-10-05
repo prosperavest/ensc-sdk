@@ -2,7 +2,12 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { describe, expect, it } from 'vitest';
-import { constructEvent, EnscClient, verifyWebhookSignature } from '../src/index.js';
+import {
+  constructEvent,
+  createEnscWebhookKeyCache,
+  EnscClient,
+  verifyWebhookSignature,
+} from '../src/index.js';
 
 const keypair = EnscClient.generateKeypair();
 
@@ -201,5 +206,88 @@ describe('key ids, bytes and Node-style headers', () => {
       new Response(JSON.stringify(doc), { status: 200 })) as unknown as typeof fetch;
     const keys = await EnscClient.fetchPublicKeys({ fetch: fetchImpl });
     expect(keys).toEqual({ k1: keypair.publicKey });
+  });
+
+  it('EnscClient.constructEvent passes merchantId and env through: a delivery signed for another merchant or environment is refused', async () => {
+    const MINE = 'mrc_01MINE00000000000000000000';
+    const OTHER = 'mrc_01OTHER0000000000000000000';
+    const KID = 'ensc_test_kid_1';
+    /** A delivery as ENSC signs it today: the body names the merchant and the environment. */
+    const deliver = (envelope: Record<string, unknown>) => {
+      const webhookId = 'whk_01TESTWEBHOOK';
+      const timestamp = Math.floor(Date.now() / 1000);
+      const body = JSON.stringify({
+        id: 'ev_01TEST',
+        type: 'conversion.succeeded',
+        apiVersion: '2026-09-15',
+        product: 'ensc',
+        ...envelope,
+        created: timestamp,
+        data: { reference: 'op:crypto-issue:0a1b2c3d', status: 'succeeded' },
+      });
+      const bodyHash = bytesToHex(sha256(new TextEncoder().encode(body)));
+      const canonical = `ENSC-WH-V1\n${webhookId}\n${timestamp}\n${bodyHash}`;
+      const sig = ed25519.sign(new TextEncoder().encode(canonical), fromB64Url(keypair.privateKey));
+      return {
+        body,
+        headers: {
+          'X-ENSC-Signature': `ed25519=${toB64Url(sig)}`,
+          'X-ENSC-Timestamp': String(timestamp),
+          'X-ENSC-Webhook-Id': webhookId,
+          'X-ENSC-Key-Id': KID,
+        },
+      };
+    };
+
+    // The keys come from the SDK's own cache, bound to the ENSC key document.
+    let asked = 0;
+    const fetchImpl = (async (url: string) => {
+      asked++;
+      expect(url).toBe('https://api.ensc.prosperavest.com/v1/.well-known/ensc-public-keys.json');
+      return new Response(
+        JSON.stringify({
+          keys: [{ kid: KID, alg: 'Ed25519', publicKey: keypair.publicKey, use: ['webhooks'] }],
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    const cache = EnscClient.webhookKeyCache({ fetch: fetchImpl });
+
+    const mine = deliver({ merchantId: MINE, env: 'live' });
+    const event = EnscClient.constructEvent({
+      ...mine,
+      publicKey: await cache.get(mine.headers),
+      merchantId: MINE,
+      env: 'live',
+    });
+    expect(event).toMatchObject({ id: 'ev_01TEST', merchantId: MINE, env: 'live' });
+    expect(event.synthetic).toBeUndefined();
+
+    // Genuine signatures, but not this receiver's events.
+    const publicKey = await cache.get(mine.headers);
+    const refused = (envelope: Record<string, unknown>, reason: string) => {
+      const d = deliver(envelope);
+      expect(
+        EnscClient.verifyWebhookSignature({ ...d, publicKey, merchantId: MINE, env: 'live' }),
+      ).toEqual({ valid: false, reason });
+      expect(() =>
+        EnscClient.constructEvent({ ...d, publicKey, merchantId: MINE, env: 'live' }),
+      ).toThrow(new RegExp(reason));
+      // Without the two options the same delivery verifies: they are what refuses it.
+      expect(EnscClient.verifyWebhookSignature({ ...d, publicKey }).valid).toBe(true);
+    };
+    refused({ merchantId: OTHER, env: 'live' }, 'merchant_mismatch');
+    refused({ merchantId: MINE, env: 'test', synthetic: true }, 'env_mismatch');
+    refused({}, 'merchant_mismatch');
+
+    // A test delivery in its own environment verifies and says what it is.
+    const test = deliver({ merchantId: MINE, env: 'test', synthetic: true });
+    expect(
+      EnscClient.constructEvent({ ...test, publicKey, merchantId: MINE, env: 'test' }).synthetic,
+    ).toBe(true);
+
+    // One load of the key document for all of the above.
+    expect(asked).toBe(1);
+    expect(createEnscWebhookKeyCache).toBeTypeOf('function');
   });
 });

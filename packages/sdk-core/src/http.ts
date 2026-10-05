@@ -1,5 +1,5 @@
 /**
- * Low-level HTTP transport.
+ * Low-level HTTP transport, shared by every SDK.
  *
  * Responsibilities:
  *   - Build the URL and headers (Bearer auth, pinned API version, key id)
@@ -8,17 +8,27 @@
  *     envelope bytes that go on the wire (encrypt-then-sign)
  *   - Auto-generate a stable idempotency key per logical request, reused across
  *     retries so a transparently retried POST cannot double-execute
- *   - Verify ENSC's signature on every successful response, then open the
+ *   - Verify the host's signature on every successful response, then open the
  *     sealed ENSC-RESP-V1 body with the merchant signing key
- *   - Retry transient failures (network errors + 5xx) with backoff; never 4xx
- *   - Map every failure to a single `EnscError` type
+ *   - Have the host's public keys in hand before a write is sent, so that a
+ *     write that succeeded is never reported as failed for want of a key
+ *   - Retry transient failures (network errors + 5xx) with backoff; never 4xx,
+ *     and never a request the host answered with success
+ *   - Never follow a redirect: the signed request goes to the configured host
+ *   - Map every failure to a single `EnscError` type; a failed write carries
+ *     its idempotency key (`details.idempotencyKey`) and the request id, so
+ *     the caller can repeat it safely with the same key or look it up
+ *   - Hand the `Deprecation` and `Sunset` headers of an answer to the
+ *     integrator's `onDeprecation` callback, so a version scheduled for
+ *     retirement is noticed before it stops being served
  *
  * Resource modules sit on top of this and never deal with fetch directly.
  */
 
 import { EnscError, isEnscErrorResponse } from '@ensc/protocol';
-import type { ResolvedConfig } from './config.js';
+import type { DeprecationNotice, ResolvedClientConfig } from './config.js';
 import { encryptRequestBody, openSealedResponse, PublicKeyResolver } from './crypto.js';
+import type { SdkProduct } from './product.js';
 import { generateIdempotencyKey, signMutation } from './signing.js';
 
 /** Query value types accepted by resource methods. `undefined` entries are dropped. */
@@ -49,9 +59,13 @@ export interface ListParams {
   cursor?: string;
 }
 
-/** Pagination plus an environment filter, for the credential and origin lists. */
+/** Pagination plus an environment filter, for the lists that take one. */
 export interface ListByEnvParams extends ListParams {
-  /** Restrict to one environment; the default is both. */
+  /**
+   * The environment to list. A list made with an API key holds what belongs
+   * to the key's own environment, whatever this names; the field is kept for
+   * compatibility and changes nothing with a key.
+   */
   env?: 'test' | 'live';
 }
 
@@ -78,12 +92,12 @@ function buildQueryString(query: Record<string, string> | undefined): string {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class HttpClient {
-  readonly #config: ResolvedConfig;
+  readonly #config: ResolvedClientConfig;
   readonly #keys: PublicKeyResolver;
 
-  constructor(config: ResolvedConfig) {
+  constructor(product: SdkProduct, config: ResolvedClientConfig) {
     this.#config = config;
-    this.#keys = new PublicKeyResolver(config);
+    this.#keys = new PublicKeyResolver(product, config);
   }
 
   /** Execute a request and return the parsed JSON body typed as `T`. */
@@ -93,6 +107,22 @@ export class HttpClient {
 
     const query = normalizeQuery(opts.query);
     const url = `${cfg.baseUrl}${opts.path}${buildQueryString(query)}`;
+
+    // The keys that verify the answer are loaded before a write goes out. If
+    // they cannot be loaded, nothing was sent and the error says so; loading
+    // them only after the write would turn a write that succeeded into an
+    // error the caller cannot tell from a failure.
+    if (isMutation) {
+      try {
+        await this.#keys.preload();
+      } catch (err) {
+        if (!(err instanceof EnscError)) throw err;
+        throw copyError(err, `${err.message}. The request was not sent.`, {
+          ...err.details,
+          requestSent: false,
+        });
+      }
+    }
 
     // Serialize the body exactly once. On a write the JSON is encrypted into an
     // ENSC-ENC-V1 envelope whose AAD binds it to this method, path, merchant
@@ -130,7 +160,35 @@ export class HttpClient {
     };
     if (bodyText !== undefined) baseHeaders['Content-Type'] = 'application/json';
 
+    // A retirement notice is handed over once per request, whatever the
+    // number of attempts.
+    let noticeGiven = false;
+    const notice = (response: Response, requestId: string | undefined): void => {
+      if (noticeGiven || !cfg.onDeprecation) return;
+      const found = readDeprecationNotice(response.headers, cfg.apiVersion, requestId);
+      if (!found) return;
+      noticeGiven = true;
+      try {
+        // A callback that returns a promise must not leave a rejection unhandled.
+        const returned: unknown = cfg.onDeprecation(found);
+        if (returned instanceof Promise) returned.catch(() => undefined);
+      } catch {
+        // The integrator's callback never decides the outcome of a request.
+      }
+    };
+
     let lastError: EnscError | undefined;
+    // What a failed write hands the caller: the key that makes a repeat safe
+    // and the request id, when the host gave one.
+    const forCaller = (err: EnscError, requestId?: string): EnscError =>
+      idempotencyKey === undefined && (requestId === undefined || err.requestId !== undefined)
+        ? err
+        : copyError(
+            err,
+            err.message,
+            idempotencyKey === undefined ? err.details : { ...err.details, idempotencyKey },
+            err.requestId ?? requestId,
+          );
 
     for (let attempt = 0; attempt <= cfg.maxRetries; attempt++) {
       // Re-sign on every attempt: timestamp and nonce must be fresh (an old
@@ -159,10 +217,13 @@ export class HttpClient {
           method: opts.method,
           headers,
           ...(bodyText !== undefined ? { body: bodyText } : {}),
+          // A redirect is never followed: the signed request, its idempotency
+          // key and the bearer key go to the configured host and nowhere else.
+          redirect: 'manual',
           signal: AbortSignal.timeout(cfg.timeoutMs),
         });
       } catch (err) {
-        // Network-level failure - no HTTP response was produced. A polyfilled
+        // Network-level failure: no HTTP response was produced. A polyfilled
         // fetch reports the timeout signal as AbortError.
         const isTimeout =
           err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
@@ -176,10 +237,22 @@ export class HttpClient {
           await sleep(retryDelayMs(attempt));
           continue;
         }
-        throw lastError;
+        throw forCaller(lastError);
       }
 
       const requestId = response.headers.get('X-ENSC-Request-Id') ?? undefined;
+      notice(response, requestId);
+      if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+        throw forCaller(
+          new EnscError(
+            'ENSC_UPSTREAM_FAILED',
+            `Request to ${opts.path} was answered with a redirect, which is not followed`,
+            { status: response.status },
+            { status: response.status >= 300 ? response.status : undefined, requestId },
+          ),
+          requestId,
+        );
+      }
       let raw: string;
       try {
         raw = await response.text();
@@ -194,27 +267,40 @@ export class HttpClient {
           await sleep(retryDelayMs(attempt));
           continue;
         }
-        throw lastError;
+        throw forCaller(lastError, requestId);
       }
 
       if (response.ok) {
         // Every successful body is sealed to our signing key and signed by
-        // ENSC. Nothing is parsed before the signature verifies, and no route
+        // the host. Nothing is parsed before the signature verifies, and no route
         // this client calls answers an empty 2xx, so an empty body is refused
         // like any other unsigned answer.
-        if (response.status === 204 || raw.length === 0) {
-          throw new EnscError(
-            'ENSC_INVALID_SIGNATURE',
-            `Response from ${opts.path} has no sealed body`,
-            { reason: 'empty_body', status: response.status },
-            { requestId },
+        //
+        // The host answered with success: the request was carried out. An
+        // answer that cannot be verified or opened is never a reason to send
+        // the request again, so nothing below is retried here, and the error
+        // names the idempotency key and the request id of what was done.
+        try {
+          if (response.status === 204 || raw.length === 0) {
+            throw new EnscError(
+              'ENSC_INVALID_SIGNATURE',
+              `Response from ${opts.path} has no sealed body`,
+              { reason: 'empty_body', status: response.status },
+              { requestId },
+            );
+          }
+          const plaintext = await openSealedResponse(cfg, this.#keys, {
+            body: raw,
+            headers: response.headers,
+          });
+          return parseJson(plaintext, opts.path) as T;
+        } catch (err) {
+          if (!(err instanceof EnscError)) throw err;
+          throw forCaller(
+            copyError(err, err.message, { ...err.details, responseStatus: response.status }),
+            requestId,
           );
         }
-        const plaintext = await openSealedResponse(cfg, this.#keys, {
-          body: raw,
-          headers: response.headers,
-        });
-        return parseJson(plaintext, opts.path) as T;
       }
 
       let parsed: unknown;
@@ -224,7 +310,7 @@ export class HttpClient {
         parsed = undefined;
       }
 
-      // Error response - prefer the API's structured ENSC error body.
+      // Error response: prefer the API's structured ENSC error body.
       const enscError = toEnscError(response.status, parsed, requestId);
       lastError = enscError;
 
@@ -233,13 +319,52 @@ export class HttpClient {
         await sleep(retryDelayMs(attempt));
         continue;
       }
-      throw enscError;
+      // A 4xx is the host's refusal: nothing was carried out and the error is
+      // the host's own. Anything else leaves the outcome open.
+      throw response.status >= 400 && response.status < 500
+        ? enscError
+        : forCaller(enscError, requestId);
     }
 
-    // Unreachable in practice - the loop either returns or throws - but satisfies
+    // Unreachable in practice (the loop either returns or throws) but satisfies
     // the type checker and covers a maxRetries/logic edge case.
     throw lastError ?? new EnscError('ENSC_INTERNAL', `Request to ${opts.path} failed`);
   }
+}
+
+/** The same error (code, status, stack) with another message, details or request id. */
+function copyError(
+  err: EnscError,
+  message: string,
+  details: Record<string, unknown> | undefined,
+  requestId: string | undefined = err.requestId,
+): EnscError {
+  const copy = new EnscError(err.code, message, details, { status: err.status, requestId });
+  if (err.stack !== undefined) copy.stack = err.stack;
+  return copy;
+}
+
+/**
+ * The retirement notice an answer carries, or undefined when it carries none.
+ * `Deprecation` is `@<unix seconds>` (RFC 9745) and `Sunset` an HTTP date
+ * (RFC 8594); a value in another form is left out.
+ */
+function readDeprecationNotice(
+  headers: Headers,
+  pinnedVersion: string,
+  requestId: string | undefined,
+): DeprecationNotice | undefined {
+  const deprecation = /^@(\d{1,12})$/.exec(headers.get('Deprecation')?.trim() ?? '');
+  const deprecatedAt = deprecation?.[1] ? new Date(Number(deprecation[1]) * 1000) : undefined;
+  const sunsetMs = Date.parse(headers.get('Sunset') ?? '');
+  const sunsetAt = Number.isNaN(sunsetMs) ? undefined : new Date(sunsetMs);
+  if (!deprecatedAt && !sunsetAt) return undefined;
+  return {
+    apiVersion: headers.get('X-ENSC-API-Version')?.trim() || pinnedVersion,
+    ...(deprecatedAt ? { deprecatedAt } : {}),
+    ...(sunsetAt ? { sunsetAt } : {}),
+    ...(requestId ? { requestId } : {}),
+  };
 }
 
 function parseJson(text: string, path: string): unknown {
@@ -265,8 +390,8 @@ function toEnscError(status: number, body: unknown, headerRequestId?: string): E
       requestId,
     });
   }
-  // The API always returns the ENSC error shape; reaching here means an
-  // unexpected upstream (proxy, gateway). Map by status as best we can.
+  // The API always returns the ENSC error shape; reaching here means the
+  // answer came from something in front of it. Map by status as best we can.
   const extra = { status, requestId: headerRequestId };
   if (status === 429) return new EnscError('ENSC_RATE_LIMITED', 'Rate limited', undefined, extra);
   if (status === 404) return new EnscError('ENSC_NOT_FOUND', 'Not found', undefined, extra);

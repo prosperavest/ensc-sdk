@@ -1,16 +1,14 @@
 /**
- * Error handling for the ENSC SDK.
+ * Error handling, shared by every SDK.
  *
- * The SDK throws `EnscError` (re-exported from `@ensc/protocol`) for every failure
- * the API reports - same class, same `code` taxonomy, same `status` map the API
- * itself uses. There is exactly one error type to catch.
- *
- *   import { EnscError, isEnscError } from '@ensc/sdk';
+ * An SDK throws `EnscError` (re-exported from `@ensc/protocol`) for every
+ * failure a host reports: same class, same `code` taxonomy, same `status` map
+ * the APIs themselves use. There is exactly one error type to catch.
  *
  *   try {
- *     await ensc.mint.create({ ... });
+ *     await client.someResource.get(...);
  *   } catch (err) {
- *     if (isEnscError(err) && err.code === 'ENSC_MINT_LIMIT_EXCEEDED') {
+ *     if (isEnscError(err) && err.code === 'ENSC_RATE_LIMITED') {
  *       // handle the specific case
  *     }
  *   }
@@ -42,12 +40,12 @@ export function isEnscErrorCode<C extends EnscErrorCode>(
   return err instanceof EnscError && err.code === code;
 }
 
-/** True when the error is a 4xx (caller's fault - retrying as-is will not help). */
+/** True when the error is a 4xx (caller's fault, retrying as-is will not help). */
 export function isClientError(err: unknown): err is EnscError {
   return err instanceof EnscError && err.status >= 400 && err.status < 500;
 }
 
-/** True when the error is a 5xx (server-side - a retry may succeed). */
+/** True when the error is a 5xx (server-side, a retry may succeed). */
 export function isServerError(err: unknown): err is EnscError {
   return err instanceof EnscError && err.status >= 500;
 }

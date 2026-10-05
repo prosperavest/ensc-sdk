@@ -98,6 +98,55 @@ describe('web3 helper', () => {
     });
   });
 
+  it('never puts the RPC URL, which usually carries an access key, into an error message', async () => {
+    const keyedUrl = 'https://rpc.example.com/v2/ACCESSKEY0123456789';
+    // The chain library's request errors carry the full URL in their message
+    // and a one-line summary beside it.
+    const libraryError = (shortMessage: string) =>
+      Object.assign(new Error(`${shortMessage}\n\nURL: ${keyedUrl}\nRequest body: {}`), {
+        shortMessage,
+      });
+
+    getChainId.mockRejectedValueOnce(libraryError('HTTP request failed.'));
+    const unreachable = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl: keyedUrl }).catch(
+      (e: unknown) => e as Error,
+    );
+    expect(unreachable).toMatchObject({ code: 'ENSC_UPSTREAM_FAILED' });
+    expect(unreachable.message).toContain('The RPC endpoint did not answer: HTTP request failed.');
+    expect(unreachable.message).not.toContain('ACCESSKEY');
+    expect(unreachable.message).not.toContain('rpc.example.com');
+
+    // An error without a summary (not the chain library's own): the URL is
+    // taken out of whatever text it carries, on every path of the helper.
+    getChainId.mockRejectedValueOnce(new Error(`connect ECONNREFUSED ${keyedUrl}`));
+    const plain = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl: keyedUrl }).catch(
+      (e: unknown) => e as Error,
+    );
+    expect(plain.message).toContain('connect ECONNREFUSED [rpc url]');
+    expect(plain.message).not.toContain('ACCESSKEY');
+
+    estimateGas.mockRejectedValueOnce(new Error(`fetch failed for ${keyedUrl}`));
+    const estimate = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl: keyedUrl }).catch(
+      (e: unknown) => e as Error,
+    );
+    expect(estimate.message).toContain('The transaction would fail');
+    expect(estimate.message).not.toContain('ACCESSKEY');
+
+    sendTransaction.mockRejectedValueOnce(new Error(`socket hang up ${keyedUrl}`));
+    const send = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl: keyedUrl }).catch(
+      (e: unknown) => e as Error,
+    );
+    expect(send.message).toContain('Failed to broadcast transaction');
+    expect(send.message).not.toContain('ACCESSKEY');
+
+    waitForTransactionReceipt.mockRejectedValueOnce(new Error(`timeout ${keyedUrl}`));
+    const receipt = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl: keyedUrl }).catch(
+      (e: unknown) => e as Error,
+    );
+    expect(receipt).toMatchObject({ details: { txHash: '0xtxhash' } });
+    expect(receipt.message).not.toContain('ACCESSKEY');
+  });
+
   it('refuses a key that is not the wallet named in `from`', async () => {
     await expect(
       signAndBroadcast({ ...unsignedTx, from: `0x${'2'.repeat(40)}` }, walletKey, { rpcUrl }),

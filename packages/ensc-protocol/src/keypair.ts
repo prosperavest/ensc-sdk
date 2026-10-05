@@ -3,8 +3,8 @@
  *
  * Why @noble/curves over tweetnacl / Node crypto / Web Crypto:
  *   - tweetnacl: unmaintained, no TypeScript, awkward seed handling
- *   - Node crypto: not available in Workers / Deno / Bun-compatible code without polyfills
- *   - Web Crypto: Ed25519 support landed in browsers and Workers but not in Node <20 reliably
+ *   - Node crypto: not available in edge runtimes / Deno / Bun-compatible code without polyfills
+ *   - Web Crypto: Ed25519 support landed in browsers and edge runtimes but not in Node <20 reliably
  *   - @noble/curves: audited, zero deps, works in every JS runtime, ~10kb
  *
  * Encoding choices:

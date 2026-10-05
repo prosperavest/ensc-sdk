@@ -53,11 +53,11 @@ All six are required. The client validates their shape at construction and throw
 Each credential rotates independently from the dashboard:
 
 - **Rotate** issues a replacement and shows it once. The previous key keeps working for **24 hours**, so deploy the new value, confirm traffic is healthy, and let the old one expire. The lists show the exact expiry (`expiresAt`).
-- **Revoke** stops a key immediately. Use it when a credential has leaked.
+- **Revoke** stops a key within a few seconds (always within one minute). Use it when a credential has leaked.
 
-When you rotate the encryption key, update `ENSC_ENCRYPTION_KEY` and `ENSC_ENCRYPTION_KEY_ID` together. When you rotate the signing key, update `ENSC_SIGNING_PRIVATE_KEY` and `ENSC_SIGNING_KEY_ID` together.
+When you rotate the encryption key, update `ENSC_ENCRYPTION_KEY` and `ENSC_ENCRYPTION_KEY_ID` together. When you rotate the signing key, update `ENSC_SIGNING_PRIVATE_KEY` and `ENSC_SIGNING_KEY_ID` together. When you rotate a live API key, the new key inherits the old key's IP allowlist.
 
-The SDK can list your keys (`ensc.apiKeys.list()`, `ensc.encryptionKeys.list()`, `ensc.signingKeys.list()`) but cannot create, rotate or revoke them; those actions are available only in the dashboard.
+The SDK can list your keys (`ensc.apiKeys.list()`, `ensc.encryptionKeys.list()`, `ensc.signingKeys.list()`) but cannot create, rotate or revoke them; those actions are available only in the dashboard (`ENSC_DASHBOARD_ONLY` from an API key). A list holds the keys of the environment of the key that asks, and a restricted key needs the `api-keys:read` scope for it.
 
 ## Losing a secret
 

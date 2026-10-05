@@ -2,7 +2,7 @@
   "name": "ensc-sdk-workspace",
   "version": "0.0.0",
   "private": true,
-  "description": "Source of @ensc/sdk, the ENSC API client, and the two packages it bundles",
+  "description": "Source of @ensc/sdk, the ENSC API client, and the three packages it bundles",
   "license": "Apache-2.0",
   "packageManager": "pnpm@12.4.1",
   "engines": {
@@ -19,7 +19,7 @@
     "check": "pnpm -r build && pnpm -r typecheck && pnpm lint && pnpm format:check && pnpm -r test"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.13",
+    "@biomejs/biome": "2.5.14",
     "typescript": "6.0.3"
   }
 }

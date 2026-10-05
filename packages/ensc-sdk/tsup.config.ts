@@ -29,13 +29,17 @@ export default defineConfig({
   // package is self-contained: consumers `npm install @ensc/sdk` and get only
   // the SDK plus @noble/* and zod, with no unpublished `workspace:*` deps to
   // resolve.
+  //   - @ensc/sdk-core: the client core shared with the other ProsperaVest
+  //     SDKs (transport, encryption, signing, sealed responses, webhooks);
+  //     used at runtime, its code is inlined.
   //   - @ensc/protocol: used at runtime, its code is inlined. Its own
   //     @noble/* imports stay external (real deps of this package).
   //   - @ensc/api-schemas: type-only import, erased at build time; only its
   //     declarations are inlined (see `dts.resolve`).
-  // Both are client-safe by design and are the only internal packages the SDK
-  // may import; they are published as source in the public SDK repository.
+  // All three are client-safe by design and are the only internal packages
+  // the SDK may import; they are published as source in the public SDK
+  // repository.
   // In the workspace, dev/typecheck/test are unaffected: `workspace:*` still
   // resolves locally exactly as before. Only the published tarball changes.
-  noExternal: ['@ensc/protocol'],
+  noExternal: ['@ensc/protocol', '@ensc/sdk-core'],
 });

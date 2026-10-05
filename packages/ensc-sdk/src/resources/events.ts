@@ -5,7 +5,7 @@
  * delivery history. Read-only.
  */
 
-import type { HttpClient, ListParams } from '../http.js';
+import type { HttpClient, ListParams } from '@ensc/sdk-core';
 
 export type EventEnv = 'test' | 'live';
 

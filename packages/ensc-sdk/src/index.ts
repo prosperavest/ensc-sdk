@@ -16,6 +16,19 @@ export {
   generateKeypair,
   publicKeyFromPrivate,
 } from '@ensc/protocol';
+// ── Errors and list / pagination input (from the shared client core) ─────
+export {
+  type DeprecationNotice,
+  EnscError,
+  type EnscErrorCode,
+  isClientError,
+  isEnscError,
+  isEnscErrorCode,
+  isEnscErrorResponse,
+  isServerError,
+  type ListByEnvParams,
+  type ListParams,
+} from '@ensc/sdk-core';
 // ── Chains ────────────────────────────────────────────────────────────────
 export {
   ASSETS,
@@ -42,19 +55,6 @@ export {
   type EnscClientConfig,
   PUBLIC_KEYS_PATH,
 } from './config.js';
-// ── Errors ────────────────────────────────────────────────────────────────
-export {
-  EnscError,
-  type EnscErrorCode,
-  isClientError,
-  isEnscError,
-  isEnscErrorCode,
-  isEnscErrorResponse,
-  isServerError,
-} from './errors.js';
-
-// ── List / pagination input ───────────────────────────────────────────────
-export type { ListByEnvParams, ListParams } from './http.js';
 export type { ResolveAccountParams } from './resources/accounts.js';
 export type { BalanceAsset, GetBalanceParams } from './resources/balance.js';
 export type {
@@ -115,11 +115,15 @@ export type {
 // ── Webhooks (for receivers) ──────────────────────────────────────────────
 export {
   constructEvent,
+  createEnscWebhookKeyCache,
   type FetchPublicKeysOptions,
   fetchEnscPublicKeys,
   type VerifyWebhookOptions,
   verifyWebhookSignature,
+  WEBHOOK_KEY_REFRESH_INTERVAL_MS,
   type WebhookEvent,
   type WebhookHeaders,
+  type WebhookKeyCache,
+  type WebhookKeyCacheOptions,
   type WebhookVerificationResult,
 } from './webhooks.js';

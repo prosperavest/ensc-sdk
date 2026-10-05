@@ -10,7 +10,7 @@ npm install @ensc/sdk
 npm install @ensc/sdk viem
 ```
 
-Requires Node 20.19+ or 22.12+ (or any modern runtime with `fetch` and Web Crypto: Workers, Deno, Bun).
+Requires Node 20.19+ or 22.12+ (or any modern runtime with `fetch` and Web Crypto, such as Deno or Bun).
 
 ## Server-side only
 
@@ -35,7 +35,7 @@ What happens on the wire, for every call:
 2. **Every successful response** arrives sealed to your signing key (HPKE, RFC 9180: X25519 + HKDF-SHA256 + ChaCha20-Poly1305) and signed by ENSC. The SDK verifies ENSC's signature against the published key set, checks the timestamp window, and only then opens the body. A response that is not sealed, not signed, or sealed to another key is rejected.
 3. **Errors** are never sealed, so a 4xx/5xx is always readable and maps to a typed `EnscError`.
 
-ENSC's response-signing public keys are fetched once per `EnscClient` from `GET /v1/.well-known/ensc-public-keys.json` and cached. To remove that dependency (locked-down egress), pin them with `enscPublicKeys: { [kid]: publicKey }`.
+ENSC's response-signing public keys are fetched once per `EnscClient` from `GET /v1/.well-known/ensc-public-keys.json` and cached; they are loaded before the first write is sent, so a write is never carried out and then reported as failed for want of a key. To remove that dependency, pin them with `enscPublicKeys: { [kid]: publicKey }`; with pinned keys there is no fetch, so update the pin when ENSC announces a new key.
 
 ## Quick start
 
@@ -86,11 +86,11 @@ ENSC_SIGNING_KEY_ID=sig_…
 ENSC_SIGNING_PRIVATE_KEY=…base64url, 43 chars…
 ```
 
-The SDK cannot issue, rotate or revoke credentials: those paths are gated server-side to the dashboard (`ENSC_DASHBOARD_ONLY`). What the SDK can do is inventory them: `ensc.apiKeys.list()`, `ensc.signingKeys.list()`, `ensc.encryptionKeys.list()`.
+The SDK cannot issue, rotate or revoke credentials: those paths are gated server-side to the dashboard (`ENSC_DASHBOARD_ONLY`). What the SDK can do is inventory them: `ensc.apiKeys.list()`, `ensc.signingKeys.list()`, `ensc.encryptionKeys.list()` and `ensc.origins.list()`. A list holds the credentials of the environment of the key that asks, and a restricted key needs the `api-keys:read` scope for it.
 
 ### Rotation
 
-Rotate any of the three keys from the dashboard. The previous key keeps working for **24 hours** after rotation so you can roll the new value through your deployment without downtime; revocation is immediate. `signingKeys.list()` shows `expiresAt` on a rotated key.
+Rotate any of the three keys from the dashboard. The previous key keeps working for **24 hours** after rotation so you can roll the new value through your deployment without downtime; revocation usually takes effect within a few seconds and always within one minute. `signingKeys.list()` shows `expiresAt` on a rotated key.
 
 ### IP allowlist
 
@@ -117,7 +117,7 @@ const c = await ensc.conversions.create({
 
 // Option A: the optional helper (needs `viem`) sends the approval, then the converter call
 import { executeVoucher } from '@ensc/sdk/web3';
-const { transaction } = await executeVoucher(c.voucher!, walletPrivateKey, { rpcUrl });
+const { transaction } = await executeVoucher(c.voucher!, signer, { rpcUrl });
 await ensc.conversions.events.confirmed(c.reference, transaction.txHash);
 
 // Option B: sign with your own infrastructure, then report
@@ -133,7 +133,9 @@ Every piece of calldata ENSC returns has the same shape: `{ from, to, data, valu
 
 `signAndBroadcast` estimates gas first, without fee fields, and sends with that estimate plus 30 percent (`gasMarginPercent`), or with the limit you pass as `gas`. Do not skip the limit when signing with your own infrastructure: without one, some nodes estimate at the block gas limit and charge that much gas up front during the simulation. On Celo the native balance is also the CELO ERC-20 balance, so a converter call that pulls CELO then sees an almost empty wallet and reverts with `transfer value exceeded balance of sender` unless the wallet holds several CELO more than the amount.
 
-If the estimate fails, nothing is broadcast and the node's reason is in the `ENSC_UPSTREAM_FAILED` message. Report the conversion failed (`events.failed`) so it does not linger.
+If the estimate fails, nothing is broadcast and the node's reason is in the `ENSC_UPSTREAM_FAILED` message. Report the conversion failed (`events.failed`) so it does not linger. A `fiat-issue` whose payment has been received cannot be reported failed (`409 ENSC_INVALID_STATE`, `details.reason` `payment_received`): ask for a new voucher instead. A `fiat-issue` that failed and is paid afterwards moves to `requires_manual_review` (`conversion.requires_manual_review`) and is resolved by ENSC. The helper's error messages never contain the RPC URL you passed, which usually carries an access key.
+
+A hash you reported can be replaced until a receipt is verified: report `submitted` or `confirmed` again with the right one. When the transaction you reported is dead (it reverted, or the network never saw it and its voucher has expired), `events.confirmed` throws `ENSC_SETTLEMENT_VERIFICATION_FAILED` with `details.voucherReissuable` `true`: call `voucher(reference)` for a new voucher, sign it and report again.
 
 A `fiat-redeem` needs `payout: { bankCode, accountNumber, accountName }`; resolve the account first with `ensc.accounts.resolve(...)` so the name matches the bank record (the API refuses a mismatch), and list banks with `ensc.banks.list()`. Once the burn is verified on chain the payout is initiated for you; `payout.succeeded` arrives by webhook.
 
@@ -143,7 +145,7 @@ A conversion can come back with `status: 'screening_hold'` (HTTP 202) while tran
 
 `quote({ type, chain, pair, amount })` prices a crypto leg without creating anything. `transfer.create` builds a plain ENSC transfer in the same `{ from, to, data, value, chainId }` shape.
 
-If `create` is cut off between the insert and the voucher (a timeout, a signer or bank-rail error), the conversion stays `created` with `lastError` set. Re-posting the same `reference` finishes it (HTTP 200) instead of returning the stuck row; `voucher(reference)` does the same.
+If `create` is cut off between the insert and the voucher (a timeout or a temporary error on our side), the conversion stays `created` with `lastError` set. Re-posting the same `reference` finishes it (HTTP 200) instead of returning the stuck row; `voucher(reference)` does the same.
 
 ### Amounts and decimals
 
@@ -157,34 +159,47 @@ ENSC tells your backend what happened by POSTing signed events to an https URL y
 
 **How it works**
 
-1. **Register an endpoint**: a public https URL on your backend, in the dashboard (Sandbox or Live, Webhooks tab) or with `ensc.webhookEndpoints.create({ env, url, eventTypes })`. `eventTypes: ['*']` subscribes to everything. The URL must be https with a public hostname; `localhost`, IP addresses and single-label hosts are refused. Sandbox and Live endpoints are separate.
-2. **Receive deliveries**: `POST` with a JSON body `{ id, type, apiVersion, created, data }`. `data` is the same object the read API returns for that resource (a conversion, or a payout summary). Headers: `X-ENSC-Signature` (`ed25519=<base64url>`), `X-ENSC-Timestamp`, `X-ENSC-Webhook-Id`, `X-ENSC-Key-Id`, `X-ENSC-Event-Type`, `X-ENSC-Event-Id`, `X-ENSC-API-Version`.
-3. **Verify before parsing**: the signature is Ed25519 over `ENSC-WH-V1\n<webhookId>\n<timestamp>\n<sha256 of the raw body>`, made with ENSC's key named by `X-ENSC-Key-Id` and published at `/v1/.well-known/ensc-public-keys.json` (`use: webhooks`). `EnscClient.fetchPublicKeys()` loads them as `{ [kid]: publicKey }`; pass that map to the verifier and a key rotation needs no redeploy. There is no shared secret to store or rotate. Deliveries older than five minutes are refused by the verifier.
-4. **Answer 2xx fast, then do the work**: ENSC waits 15 seconds. Queue the event and return `200`; do bank calls, order fulfilment and chain lookups afterwards.
-5. **Expect retries and duplicates**: delivery is at least once. A non-2xx answer or a timeout is retried after 1 min, 5 min, 15 min, 1 h, 2 h, 4 h and 8 h (8 attempts in total over about 15 hours), then marked `gave_up`. The same event `id` is reused on every attempt: de-duplicate on it before applying side effects.
-6. **Do not rely on order**: successive events for one conversion can arrive out of order. Act on the `status` the event carries, and before releasing goods or money read the conversion back with `ensc.conversions.get(reference)`.
+1. **Register an endpoint**: a public https URL on your backend, in the dashboard (Sandbox or Live, Webhooks tab) or with `ensc.webhookEndpoints.create({ env, url, eventTypes })`. `eventTypes: ['*']` subscribes to everything. The URL must be https on the default port with a public host name and no credentials: a port other than the default, a host name ending in a dot, an IP address, `localhost`, a single-label or private name (`.local`, `.internal`, `.lan`, `.home`, `.corp`, `.home.arpa`) and a host under `prosperavest.com` are refused when you register or change the endpoint (`400 ENSC_VALIDATION_FAILED`; `details.fields` names the field, not the reason). An endpoint registered earlier with a URL that names a port is never delivered to. Sandbox and Live endpoints are separate: a key manages the endpoints of its own environment only (`env` must be the key's), and each environment holds at most 20.
+2. **Receive deliveries**: `POST` with a JSON body `{ id, type, apiVersion, product, merchantId, env, created, data }`; a test delivery also carries `synthetic: true`. `data` is the same object the read API returns for that resource (a conversion, or a payout summary). Headers: `X-ENSC-Signature` (`ed25519=<base64url>`), `X-ENSC-Timestamp`, `X-ENSC-Webhook-Id`, `X-ENSC-Key-Id`, `X-ENSC-Event-Type`, `X-ENSC-Event-Id`, `X-ENSC-API-Version`.
+3. **Verify before parsing**: the signature is Ed25519 over `ENSC-WH-V1\n<webhookId>\n<timestamp>\n<sha256 of the raw body>`, made with ENSC's key named by `X-ENSC-Key-Id` and published at `/v1/.well-known/ensc-public-keys.json` (`use: webhooks`). There is no shared secret to store or rotate. Deliveries older than five minutes are refused by the verifier.
+4. **Check that the event is yours**: the signature proves ENSC sent the delivery, not for whom. The signed body names the merchant (`merchantId`) and the environment (`env`). Pass your own `merchantId` and the `env` your receiver serves to the verifier: it refuses a genuine delivery made for another merchant or for the other environment. In Live, ignore an event whose `synthetic` is `true`.
+5. **Answer 2xx fast, then do the work**: ENSC waits 15 seconds. Record the event and return `200`; do bank calls, order fulfilment and chain lookups afterwards.
+6. **Expect retries and duplicates**: delivery is at least once. A non-2xx answer, a redirect (never followed) or a timeout is retried after 1 min, 5 min, 15 min, 1 h, 2 h, 4 h and 8 h (8 attempts in total over about 15 hours), then marked `gave_up`. The same event `id` is reused on every attempt: de-duplicate on it before applying side effects.
+7. **Do not rely on order**: successive events for one conversion can arrive out of order. Act on the `status` the event carries, and before releasing goods or money read the conversion back with `ensc.conversions.get(reference)`.
 
 ```ts
 import { EnscClient } from '@ensc/sdk';
 
-const enscKeys = await EnscClient.fetchPublicKeys(); // { [kid]: publicKey }; cache it, refetch on an unknown kid
+// One per process. Loads ENSC's webhook keys on first use and keeps them; an
+// unknown key id loads them again at most once a minute.
+const enscKeys = EnscClient.webhookKeyCache();
 
-// In your webhook route (Express, Next.js route handler, a worker, ...):
-const event = EnscClient.constructEvent({
-  body: rawRequestBody,       // string or bytes, exactly as received, before any JSON parsing
-  headers: request.headers,   // Headers instance or a plain record (Node's req.headers works)
-  publicKey: enscKeys,        // the verifier picks the key named by X-ENSC-Key-Id
-});
+// In your webhook route (any HTTP framework):
+let event;
+try {
+  event = EnscClient.constructEvent({
+    body: rawRequestBody,                      // string or bytes, exactly as received, before any JSON parsing
+    headers: request.headers,                  // Headers instance or a plain record (Node's req.headers works)
+    publicKey: await enscKeys.get(request.headers), // the verifier picks the key named by X-ENSC-Key-Id
+    merchantId: process.env.ENSC_MERCHANT_ID!, // refuses a delivery signed for another merchant
+    env: 'live',                               // refuses a Sandbox delivery; 'test' on a Sandbox receiver
+  });
+} catch {
+  return new Response('invalid signature', { status: 401 });
+}
+if (event.synthetic) return new Response(null, { status: 200 }); // Live: a test delivery is never acted on
 if (await alreadyHandled(event.id)) return new Response(null, { status: 200 });
-await queue.push(event);        // process after answering
+await enqueue(event);           // process after answering
 return new Response(null, { status: 200 });
 ```
 
-`constructEvent` throws `EnscError('ENSC_INVALID_SIGNATURE')` on failure. For non-throwing checks use `EnscClient.verifyWebhookSignature(...)`, which returns `{ valid, reason? }`.
+`EnscClient.webhookKeyCache()` keeps the key document: `get(headers)` loads it on first use and again when a delivery names a key id that is not cached, at most once per interval (`minRefreshIntervalMs`, 60000 by default) however many deliveries name unknown ids. A key rotation needs no redeploy, and requests with invented key ids cannot make your server load the document over and over. `EnscClient.fetchPublicKeys()` is one request per call: use it to pin keys, never once per delivery.
+
+`constructEvent` throws `EnscError('ENSC_INVALID_SIGNATURE')` with the reason in `details.reason`. For non-throwing checks use `EnscClient.verifyWebhookSignature(...)`, which takes the same options and returns `{ valid, reason? }`. The reasons: `missing_signature`, `missing_timestamp`, `missing_webhook_id`, `bad_signature_format`, `timestamp_out_of_tolerance`, `invalid_tolerance` (a `toleranceSeconds` that is not a number of zero or more; only an explicit `0` turns the window off), `unknown_key_id`, `signature_mismatch`, `merchant_mismatch` and `env_mismatch`. Always pass `merchantId` and `env`: without them only the signature and the timestamp are checked.
 
 **Event types**: `conversion.created`, `conversion.screening_hold`, `conversion.awaiting_payment`, `conversion.payment_confirmed`, `conversion.voucher_issued`, `conversion.onchain_confirmed`, `conversion.settled`, `conversion.succeeded`, `conversion.failed`, `conversion.requires_manual_review`, `payout.initiated`, `payout.succeeded`, `payout.failed`. Credit your customer on `conversion.succeeded` (or `payout.succeeded` for a fiat-redeem), never earlier.
 
-**Testing your receiver**: deploy it to the public URL you will register (the same hosting your backend uses), register that URL in Sandbox, then queue signed test deliveries: `ensc.webhookEndpoints.sendTest(id, { eventType: 'payout.succeeded' })` queues one event of that type, with the fields a real one carries, in that endpoint's environment; every active endpoint there that subscribes to the type receives it, and the response says whether the endpoint you named is among them (`willDeliverToTargetEndpoint`). `ensc.testEvents.emit({ eventType })` does the same for the whole Sandbox stream. A Live endpoint accepts only `synthetic.test_event`, so a real event type can never be forged into a Live receiver. `ensc.events.get(eventId)` shows each delivery attempt with your endpoint's HTTP answer, and `ensc.events.list()` is the log. Nothing in ENSC needs a tunnel or a request inspector; those only stand in for a deployed URL during local development.
+**Testing your receiver**: deploy it to the public URL you will register (the same hosting your backend uses), register that URL in Sandbox, then send signed test deliveries: `ensc.webhookEndpoints.sendTest(id, { eventType: 'payout.succeeded' })` emits one event of that type, with the fields a real one carries, in that endpoint's environment; every active endpoint there that subscribes to the type receives it, and the response says whether the endpoint you named is among them (`willDeliverToTargetEndpoint`). `ensc.testEvents.emit({ eventType })` does the same for the whole Sandbox stream. Every delivery these produce carries `synthetic: true`; a Live endpoint can be sent only `synthetic.test_event`. `ensc.events.get(eventId)` shows each delivery attempt with your endpoint's HTTP answer, and `ensc.events.list()` is the log.
 
 **Scopes**: a secret key manages webhooks and reads the event log. A restricted key needs `webhooks:read` to list and read, `webhooks:manage` to create, change, test or delete endpoints.
 
@@ -206,13 +221,36 @@ try {
 }
 ```
 
-Codes the SDK itself raises on the response path: `ENSC_INVALID_SIGNATURE` (response not signed by a known ENSC key, or outside the timestamp window) and `ENSC_DECRYPTION_FAILED` (sealed body could not be opened with your signing key, usually a mismatched `signingKeyId`/`signingPrivateKey` pair).
+Codes the SDK itself raises on the response path: `ENSC_INVALID_SIGNATURE` (response not signed by a known ENSC key, outside the timestamp window, or an empty 2xx body), `ENSC_DECRYPTION_FAILED` (sealed body could not be opened with your signing key, usually a mismatched `signingKeyId`/`signingPrivateKey` pair) and `ENSC_UPSTREAM_FAILED` (a network error or timeout, an unreadable body, a redirect, or a non-ENSC answer from a gateway).
 
-Transient failures (network errors, timeouts, 500, 502, 503 and 504) are retried automatically (`maxRetries`, default 2); 4xx and 429 are never retried. Every write carries a stable idempotency key across those retries, and the API honours it on every write route, so a transparently retried POST cannot double-execute. Every `EnscError` carries `status` (the HTTP status received), `requestId` (from `X-ENSC-Request-Id`, quote it to support) and, where the API sent them, `details`.
+Transient failures (network errors, timeouts, 500, 502, 503 and 504) are retried automatically (`maxRetries`, default 2); 4xx and 429 are never retried, and a redirect is never followed. Every write carries a stable idempotency key across those retries, and the API honours it on every write route, so a transparently retried POST cannot double-execute. Every `EnscError` carries `status` (the HTTP status received), `requestId` (from `X-ENSC-Request-Id`, quote it to support) and, where the API sent them, `details`.
+
+A failed write whose outcome is open carries what you need to settle it:
+
+| `details` field | Meaning |
+| --- | --- |
+| `idempotencyKey` | The idempotency key the SDK sent. Repeat the call with it and it cannot execute twice. Present on a network failure, a timeout, a 5xx, a redirect, and any failure after a 2xx answer. |
+| `responseStatus` | The 2xx status ENSC answered with: the request was carried out, but its answer could not be verified or opened. Do not send it again under a new key; read the resource back. |
+| `requestSent` | `false` when ENSC's public keys could not be loaded before the write: nothing was sent. |
+
+A 4xx is ENSC's own refusal and carries none of these. An answer that tells you to retry (`409`, `429`) is not remembered under its idempotency key, so the same key runs the request again.
+
+### API version notices
+
+Pass `onDeprecation` to the client to be told when the API version the SDK pins is scheduled for retirement. It is called, at most once per request, when an answer carries the `Deprecation` or `Sunset` response header, with `{ apiVersion, deprecatedAt?, sunsetAt?, requestId? }` (the two times are `Date` objects). It only informs: an exception it throws is ignored. No version is scheduled for retirement today.
+
+```ts
+const ensc = new EnscClient({
+  // ...the six credentials
+  onDeprecation: ({ apiVersion, sunsetAt }) => console.warn(`ENSC API ${apiVersion} stops being served on ${sunsetAt?.toISOString()}`),
+});
+```
 
 ## Chains
 
-`chain` is a string at the API boundary. The SDK exports a `ChainSlug` union and `KNOWN_CHAINS` for autocomplete, but any string is accepted; an unknown or disabled chain comes back as `ENSC_INVALID_CHAIN`. Conversions run on `CONVERTER_CHAINS.live` (`celo`) with a live key and `CONVERTER_CHAINS.test` (`celo-sepolia`) with a test key; a key never reaches the other environment's chain. The API is multichain by registry: a chain is added by configuration, with no change to your integration beyond naming the new slug, and a new converter chain is announced in the changelog.
+`chain` is a string at the API boundary. The SDK exports a `ChainSlug` union and `KNOWN_CHAINS` for autocomplete, but any string is accepted. `KNOWN_CHAINS` is every chain the API can serve: `MAINNET_CHAINS` (`celo`, `base`, `polygon`, `optimism`, `arbitrum`, `bsc`, `mode`, `plume`) with a live key and `TESTNET_CHAINS` (`celo-sepolia`, `base-sepolia`, `polygon-amoy`, `optimism-sepolia`, `arbitrum-sepolia`, `bsc-testnet`, `mode-sepolia`, `plume-testnet`) with a test key. Being in the list does not mean a chain is switched on: a chain that is not enabled for your environment comes back as `ENSC_INVALID_CHAIN`, as an unknown slug does. `ethereum` and `sepolia` are not served.
+
+Conversions run on `CONVERTER_CHAINS.live` (`celo`) with a live key and `CONVERTER_CHAINS.test` (`celo-sepolia`) with a test key, and on no other chain; a key never reaches the other environment's chain. On the other chains ENSC is a token only: `balance.get` and `transfer.create` work there. A chain is added without any change to your integration beyond naming the new slug, and a new converter chain is announced in the changelog.
 
 ## API surface
 
@@ -226,12 +264,13 @@ Transient failures (network errors, timeouts, 500, 502, 503 and 504) are retried
 | Reads | `balance` | `get` |
 | Reads | `events` | `list`, `get` |
 | Sandbox | `testEvents` | `list`, `emit` |
-| Management | `apiKeys` `signingKeys` `encryptionKeys` `origins` | `list` |
+| Management | `apiKeys` `signingKeys` `encryptionKeys` `origins` | `list` (the key's own environment) |
 | Management | `webhookEndpoints` | `create`, `list`, `get`, `update`, `remove`, `sendTest` |
+| Static | `EnscClient` | `webhookKeyCache`, `fetchPublicKeys`, `constructEvent`, `verifyWebhookSignature` |
 
 ## Verifying this package
 
-`@ensc/sdk` is staged only by GitHub Actions, from `sdk-v*` release tags, using npm trusted publishing (OIDC), and goes live only when a maintainer approves the staged version with 2FA. There is no long-lived npm token. Every published version is registry-signed; run `npm audit signatures` after installing to verify it. A legitimate release has exactly four runtime dependencies (`@noble/ciphers`, `@noble/curves`, `@noble/hashes`, and `zod` for the exported API types), an optional `viem` peer, and **no install scripts**; anything else is a red flag. From 0.4.0 every version also carries a provenance attestation linking it to the commit and workflow run in `github.com/prosperavest/ensc-sdk`; npm shows it on the version page, and `npm audit signatures` checks it.
+`@ensc/sdk` is staged only by the release workflow of the SDK repository, from `sdk-v*` release tags on commits of its `main` branch, using npm trusted publishing (OIDC), and goes live only when a maintainer approves the staged version with 2FA. There is no long-lived npm token. Every published version is registry-signed; run `npm audit signatures` after installing to verify it. A legitimate release has exactly four runtime dependencies (`@noble/ciphers`, `@noble/curves`, `@noble/hashes`, and `zod` for the exported API types), an optional `viem` peer, and **no install scripts**; anything else is a red flag. From 0.4.0 every version also carries a provenance attestation linking it to the commit and workflow run in `github.com/prosperavest/ensc-sdk`; npm shows it on the version page, and `npm audit signatures` checks it.
 
 ## License
 

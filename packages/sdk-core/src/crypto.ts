@@ -1,8 +1,9 @@
 /**
  * Payload protection: request encryption (ENSC-ENC-V1) and sealed-response
- * verification + opening (ENSC-RESP-V1).
+ * verification + opening (ENSC-RESP-V1). Shared by every SDK; the product
+ * decides only which well-known document the signing keys come from.
  *
- * The SDK does not implement any cryptography of its own. The primitives live
+ * No SDK implements any cryptography of its own. The primitives live
  * in `@ensc/protocol`, the same module the API uses to decrypt requests and seal
  * responses, so both sides cannot drift: AES-256-GCM via Web Crypto for the
  * request envelope, HPKE (RFC 9180 base mode, X25519 + HKDF-SHA256 +
@@ -17,7 +18,8 @@
  *              plaintext JSON
  *
  * A response is never trusted before its signature verifies, and the decrypted
- * plaintext is bound to this request through the request id in the HPKE info.
+ * plaintext is bound to the request id the response carries through the HPKE
+ * info.
  */
 
 import {
@@ -32,9 +34,20 @@ import {
   utf8ToBytes,
 } from '@ensc/protocol';
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { PUBLIC_KEYS_PATH, type ResolvedConfig } from './config.js';
+import type { ResolvedClientConfig } from './config.js';
+import type { SdkProduct } from './product.js';
 
 export const RESPONSE_SIGNATURE_VERSION = 'ENSC-RESP-V1' as const;
+
+/**
+ * How many times the public key document is asked for before the load fails:
+ * the first try and two more, 200 ms then 400 ms apart. The document is a
+ * small public GET, so asking again is always safe, and a load that fails
+ * leaves an answer that cannot be verified; the request that answer belongs
+ * to is never sent again because of it.
+ */
+export const KEY_FETCH_ATTEMPTS = 3;
+const KEY_FETCH_BACKOFF_MS = 200;
 
 /** Headers a sealed response carries. */
 export const RESPONSE_HEADERS = {
@@ -57,7 +70,7 @@ export interface EncryptRequestInput {
  * JSON string to put on the wire. The caller signs this string.
  */
 export async function encryptRequestBody(
-  cfg: ResolvedConfig,
+  cfg: ResolvedClientConfig,
   input: EncryptRequestInput,
 ): Promise<string> {
   const aad = buildRequestAad({
@@ -75,7 +88,7 @@ export async function encryptRequestBody(
   return JSON.stringify(envelope);
 }
 
-/** The exact string ENSC signs for a sealed response. */
+/** The exact string the host signs for a sealed response. */
 export function buildResponseCanonical(requestId: string, timestamp: string, body: string): string {
   return `${RESPONSE_SIGNATURE_VERSION}\n${requestId}\n${timestamp}\n${sha256Hex(body)}`;
 }
@@ -99,34 +112,38 @@ function isPublicKeysDocument(value: unknown): value is PublicKeysDocument {
 }
 
 /**
- * Resolves ENSC's response-signing public keys. Uses the pinned
- * `config.enscPublicKeys` when given; otherwise fetches the well-known
+ * Resolves the host's response-signing public keys. Uses the pinned
+ * `serverPublicKeys` when given; otherwise fetches the product's well-known
  * document once and caches it for the life of the client. An unknown key id
- * triggers exactly one refetch (ENSC rotating its key) before the response is
- * rejected.
+ * triggers exactly one refetch (the host rotating its key) before the
+ * response is rejected. A fetch that fails is tried again up to
+ * {@link KEY_FETCH_ATTEMPTS} times in all.
  */
 export class PublicKeyResolver {
-  readonly #cfg: ResolvedConfig;
+  readonly #product: SdkProduct;
+  readonly #cfg: ResolvedClientConfig;
   #keys: Map<string, Uint8Array> | undefined;
   #pending: Promise<Map<string, Uint8Array>> | undefined;
 
-  constructor(cfg: ResolvedConfig) {
+  constructor(product: SdkProduct, cfg: ResolvedClientConfig) {
+    this.#product = product;
     this.#cfg = cfg;
-    if (cfg.enscPublicKeys) {
+    if (cfg.serverPublicKeys) {
       this.#keys = new Map(
-        Object.entries(cfg.enscPublicKeys).map(([kid, pk]) => [kid, base64UrlToBytes(pk)]),
+        Object.entries(cfg.serverPublicKeys).map(([kid, pk]) => [kid, base64UrlToBytes(pk)]),
       );
     }
   }
 
   /** Look a key up, fetching or refetching the well-known document as needed. */
   async resolve(kid: string): Promise<Uint8Array> {
-    if (this.#cfg.enscPublicKeys) {
+    const name = this.#product.name;
+    if (this.#cfg.serverPublicKeys) {
       const pinned = this.#keys?.get(kid);
       if (pinned) return pinned;
       throw new EnscError(
         'ENSC_INVALID_SIGNATURE',
-        `Response was signed with unknown ENSC key "${kid}" (not in config.enscPublicKeys)`,
+        `Response was signed with unknown ${name} key "${kid}" (not in config.${this.#product.publicKeysConfigField})`,
       );
     }
     const cached = (this.#keys ?? (await this.#load())).get(kid);
@@ -135,38 +152,63 @@ export class PublicKeyResolver {
     if (refreshed) return refreshed;
     throw new EnscError(
       'ENSC_INVALID_SIGNATURE',
-      `Response was signed with unknown ENSC key "${kid}"`,
+      `Response was signed with unknown ${name} key "${kid}"`,
     );
+  }
+
+  /**
+   * Make sure the keys are in hand before a write is sent, so that verifying
+   * its answer needs no further network call: when they are neither pinned
+   * nor loaded yet, load them now. A failure here happens before anything was
+   * sent.
+   */
+  async preload(): Promise<void> {
+    if (this.#cfg.serverPublicKeys || this.#keys) return;
+    await this.#load();
   }
 
   #load(): Promise<Map<string, Uint8Array>> {
     if (!this.#pending) {
-      this.#pending = this.#fetch().finally(() => {
+      this.#pending = this.#fetchWithRetry().finally(() => {
         this.#pending = undefined;
       });
     }
     return this.#pending;
   }
 
+  async #fetchWithRetry(): Promise<Map<string, Uint8Array>> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.#fetch();
+      } catch (err) {
+        if (attempt >= KEY_FETCH_ATTEMPTS) throw err;
+        await new Promise((r) => setTimeout(r, KEY_FETCH_BACKOFF_MS * 2 ** (attempt - 1)));
+      }
+    }
+  }
+
   async #fetch(): Promise<Map<string, Uint8Array>> {
     const cfg = this.#cfg;
+    const name = this.#product.name;
     let res: Response;
     try {
-      res = await cfg.fetch(`${cfg.baseUrl}${PUBLIC_KEYS_PATH}`, {
+      res = await cfg.fetch(`${cfg.baseUrl}${this.#product.publicKeysPath}`, {
         method: 'GET',
         headers: { Accept: 'application/json' },
+        // A redirect is never followed: the keys come from the host asked.
+        redirect: 'manual',
         signal: AbortSignal.timeout(cfg.timeoutMs),
       });
     } catch (err) {
       throw new EnscError(
         'ENSC_UPSTREAM_FAILED',
-        `Could not fetch ENSC public keys: ${(err as Error).message}`,
+        `Could not fetch ${name} public keys: ${(err as Error).message}`,
       );
     }
     if (!res.ok) {
       throw new EnscError(
         'ENSC_UPSTREAM_FAILED',
-        `Could not fetch ENSC public keys: HTTP ${res.status}`,
+        `Could not fetch ${name} public keys: HTTP ${res.status}`,
       );
     }
     let doc: unknown;
@@ -176,7 +218,7 @@ export class PublicKeyResolver {
       doc = undefined;
     }
     if (!isPublicKeysDocument(doc)) {
-      throw new EnscError('ENSC_UPSTREAM_FAILED', 'ENSC public key document is malformed');
+      throw new EnscError('ENSC_UPSTREAM_FAILED', `${name} public key document is malformed`);
     }
     const map = new Map<string, Uint8Array>();
     for (const k of doc.keys) {
@@ -192,7 +234,7 @@ export class PublicKeyResolver {
     if (map.size === 0) {
       throw new EnscError(
         'ENSC_UPSTREAM_FAILED',
-        'ENSC public key document contains no response-signing key',
+        `${name} public key document contains no response-signing key`,
       );
     }
     this.#keys = map;
@@ -212,7 +254,7 @@ export interface OpenSealedInput {
  * unacceptable and `ENSC_DECRYPTION_FAILED` when the envelope cannot be opened.
  */
 export async function openSealedResponse(
-  cfg: ResolvedConfig,
+  cfg: ResolvedClientConfig,
   keys: PublicKeyResolver,
   input: OpenSealedInput,
 ): Promise<string> {
