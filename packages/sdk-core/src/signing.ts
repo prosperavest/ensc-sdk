@@ -1,13 +1,13 @@
 /**
- * Request signing - a thin wrapper over `@ensc/protocol`.
+ * Request signing, a thin wrapper over `@ensc/protocol`.
  *
- * The SDK does not reimplement the signing scheme. `@ensc/protocol` is the single
+ * No SDK reimplements the signing scheme. `@ensc/protocol` is the single
  * source of truth: the same package the API uses to *verify* requests builds the
  * canonical string and Ed25519 signature here. If the scheme ever changes, both
  * sides move together and cannot drift out of compatibility.
  *
- * This module only adds the per-request ephemerals - a fresh timestamp and a
- * unique nonce - and produces the headers the transport attaches.
+ * This module only adds the per-request ephemerals, a fresh timestamp and a
+ * unique nonce, and produces the headers the transport attaches.
  */
 
 import { signRequest, toBase64Url } from '@ensc/protocol';

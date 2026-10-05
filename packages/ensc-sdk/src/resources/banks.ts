@@ -6,7 +6,7 @@
  */
 
 import type * as api from '@ensc/api-schemas';
-import type { HttpClient } from '../http.js';
+import type { HttpClient } from '@ensc/sdk-core';
 
 export class BanksResource {
   readonly #http: HttpClient;

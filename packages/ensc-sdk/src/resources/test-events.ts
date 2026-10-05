@@ -7,7 +7,7 @@
  * payload per type. To target one endpoint, use `webhookEndpoints.sendTest`.
  */
 
-import type { HttpClient } from '../http.js';
+import type { HttpClient } from '@ensc/sdk-core';
 
 export interface TestEventTemplate {
   eventType: string;

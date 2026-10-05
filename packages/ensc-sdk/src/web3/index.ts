@@ -172,7 +172,7 @@ export async function signAndBroadcast(
   } catch (err) {
     throw new EnscError(
       'ENSC_UPSTREAM_FAILED',
-      `The RPC endpoint did not answer: ${err instanceof Error ? err.message : String(err)}`,
+      `The RPC endpoint did not answer: ${describeRpcError(err, options.rpcUrl)}`,
     );
   }
   if (rpcChainId !== unsignedTransaction.chainId) {
@@ -198,7 +198,7 @@ export async function signAndBroadcast(
       if (err instanceof EnscError) throw err;
       throw new EnscError(
         'ENSC_UPSTREAM_FAILED',
-        `The transaction would fail: ${describeRpcError(err)}`,
+        `The transaction would fail: ${describeRpcError(err, options.rpcUrl)}`,
       );
     }
   }
@@ -218,7 +218,7 @@ export async function signAndBroadcast(
   } catch (err) {
     throw new EnscError(
       'ENSC_UPSTREAM_FAILED',
-      `Failed to broadcast transaction: ${describeRpcError(err)}`,
+      `Failed to broadcast transaction: ${describeRpcError(err, options.rpcUrl)}`,
     );
   }
   if (options.waitForReceipt === false) return { txHash };
@@ -228,18 +228,29 @@ export async function signAndBroadcast(
   } catch (err) {
     throw new EnscError(
       'ENSC_UPSTREAM_FAILED',
-      `Transaction ${txHash} was sent but its receipt could not be read: ${describeRpcError(err)}`,
+      `Transaction ${txHash} was sent but its receipt could not be read: ${describeRpcError(err, options.rpcUrl)}`,
       { txHash },
     );
   }
 }
 
-/** viem errors carry a one-line summary next to a long multi-line message. */
-function describeRpcError(err: unknown): string {
-  if (err && typeof err === 'object' && 'shortMessage' in err) {
-    return String((err as { shortMessage: unknown }).shortMessage);
-  }
-  return err instanceof Error ? err.message : String(err);
+/** What stands in for the RPC URL in an error message. */
+const RPC_URL_PLACEHOLDER = '[rpc url]';
+
+/**
+ * One line that says what the node or the connection reported, safe to log.
+ * viem errors carry a one-line summary next to a long multi-line message; the
+ * long one names the full RPC URL, which usually holds an access key, so only
+ * the summary is used. Whatever text is used, the RPC URL is taken out of it.
+ */
+function describeRpcError(err: unknown, rpcUrl: string): string {
+  const text =
+    err && typeof err === 'object' && 'shortMessage' in err
+      ? String((err as { shortMessage: unknown }).shortMessage)
+      : err instanceof Error
+        ? err.message
+        : String(err);
+  return text.split(rpcUrl).join(RPC_URL_PLACEHOLDER);
 }
 
 /**

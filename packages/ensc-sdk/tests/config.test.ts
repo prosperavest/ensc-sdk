@@ -23,7 +23,7 @@ describe('resolveConfig, defaults', () => {
     expect(c.encryptionKeyId).toBe(fx.encryptionKeyId);
     expect(c.signingPrivateKey).toBe(fx.signingPrivateKey);
     expect(c.signingKeyId).toBe(fx.signingKeyId);
-    expect(c.enscPublicKeys).toBeUndefined();
+    expect(c.serverPublicKeys).toBeUndefined();
     expect(c.baseUrl).toBe(DEFAULT_BASE_URL);
     expect(c.apiVersion).toBe(DEFAULT_API_VERSION);
     expect(c.timeoutMs).toBe(DEFAULT_TIMEOUT_MS);
@@ -55,7 +55,7 @@ describe('resolveConfig, defaults', () => {
 
   it('keeps pinned ENSC public keys', () => {
     const c = resolveConfig({ ...minimal, enscPublicKeys: { [ENSC_KID]: ENSC_PUBLIC_KEY } });
-    expect(c.enscPublicKeys).toEqual({ [ENSC_KID]: ENSC_PUBLIC_KEY });
+    expect(c.serverPublicKeys).toEqual({ [ENSC_KID]: ENSC_PUBLIC_KEY });
   });
 });
 

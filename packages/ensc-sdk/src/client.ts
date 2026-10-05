@@ -22,12 +22,14 @@
  *
  * Every write is encrypted (ENSC-ENC-V1) and signed (ENSC-V1); every successful
  * response is verified against ENSC's published key and opened (ENSC-RESP-V1)
- * before it is returned. None of that is visible to callers.
+ * before it is returned. None of that is visible to callers. The transport
+ * itself is `@ensc/sdk-core`, shared with the other ProsperaVest SDKs; this
+ * class is the ENSC product's surface on it.
  */
 
 import { type Ed25519Keypair, generateKeypair } from '@ensc/protocol';
-import { type EnscClientConfig, resolveConfig } from './config.js';
-import { HttpClient } from './http.js';
+import { HttpClient } from '@ensc/sdk-core';
+import { ENSC_PRODUCT, type EnscClientConfig, resolveConfig } from './config.js';
 import { AccountsResource } from './resources/accounts.js';
 import { ApiKeysResource } from './resources/api-keys.js';
 import { BalanceResource } from './resources/balance.js';
@@ -42,11 +44,14 @@ import { TransferResource } from './resources/transfer.js';
 import { WebhookEndpointsResource } from './resources/webhook-endpoints.js';
 import {
   constructEvent,
+  createEnscWebhookKeyCache,
   type FetchPublicKeysOptions,
   fetchEnscPublicKeys,
   type VerifyWebhookOptions,
   verifyWebhookSignature,
   type WebhookEvent,
+  type WebhookKeyCache,
+  type WebhookKeyCacheOptions,
   type WebhookVerificationResult,
 } from './webhooks.js';
 
@@ -70,13 +75,13 @@ export class EnscClient {
   readonly accounts: AccountsResource;
   readonly transfer: TransferResource;
 
-  // The transport - and the resolved config / secrets it closes over - is held
+  // The transport, and the resolved config / secrets it closes over, is held
   // privately. It is not enumerable and not reachable from outside the instance.
   readonly #http: HttpClient;
 
   constructor(config: EnscClientConfig) {
     const resolved = resolveConfig(config);
-    this.#http = new HttpClient(resolved);
+    this.#http = new HttpClient(ENSC_PRODUCT, resolved);
 
     this.apiKeys = new ApiKeysResource(this.#http);
     this.signingKeys = new SigningKeysResource(this.#http);
@@ -108,8 +113,22 @@ export class EnscClient {
   }
 
   /**
-   * Verify an inbound webhook delivery's signature. Never throws - returns a
-   * result object. Static: webhook receivers don't need a configured client.
+   * Verify an inbound webhook delivery's signature. Never throws; returns
+   * `{ valid, reason? }`. Static: a webhook receiver needs no configured client.
+   *
+   * Pass `body` (the raw request body, before any JSON parsing), `headers`,
+   * `publicKey` (the keys from {@link EnscClient.webhookKeyCache}) and your
+   * own `merchantId` and `env`. With those two the delivery must have been
+   * signed for your merchant and for that environment: one signed for another
+   * merchant, or for the other environment, is refused (`merchant_mismatch`,
+   * `env_mismatch`) although its signature is genuine. Without them only the
+   * signature and the timestamp are checked, so always pass both.
+   *
+   * `reason` is one of `missing_signature`, `missing_timestamp`,
+   * `missing_webhook_id`, `bad_signature_format`, `timestamp_out_of_tolerance`,
+   * `invalid_tolerance` (a `toleranceSeconds` that is not a number of zero or
+   * more), `unknown_key_id`, `signature_mismatch`, `merchant_mismatch` and
+   * `env_mismatch`.
    */
   static verifyWebhookSignature(opts: VerifyWebhookOptions): WebhookVerificationResult {
     return verifyWebhookSignature(opts);
@@ -117,18 +136,45 @@ export class EnscClient {
 
   /**
    * Verify an inbound webhook delivery and return the parsed event. Throws
-   * `EnscError('ENSC_INVALID_SIGNATURE')` if verification fails.
+   * `EnscError('ENSC_INVALID_SIGNATURE')` with `details.reason` when
+   * verification fails, and `ENSC_VALIDATION_FAILED` when the verified body is
+   * not an event.
+   *
+   *   const event = EnscClient.constructEvent({
+   *     body: rawBody,
+   *     headers,
+   *     publicKey: await keys.get(headers), // keys = EnscClient.webhookKeyCache()
+   *     merchantId: process.env.ENSC_MERCHANT_ID!,
+   *     env: 'live',
+   *   });
+   *
+   * Always pass your own `merchantId` and the `env` this receiver serves: a
+   * delivery signed for another merchant or for the other environment is then
+   * refused. The event carries `merchantId`, `env` and, on a test delivery,
+   * `synthetic: true`; a Live receiver acknowledges a synthetic event and
+   * never acts on it.
    */
   static constructEvent<T = unknown>(opts: VerifyWebhookOptions): WebhookEvent<T> {
     return constructEvent<T>(opts);
   }
 
   /**
-   * Load ENSC's current webhook signing keys, `{ [kid]: publicKey }`, for
-   * `constructEvent` and `verifyWebhookSignature`. Cache the result and refetch
-   * when a delivery names a key id you do not hold.
+   * Load ENSC's current webhook signing keys, `{ [kid]: publicKey }`. Every
+   * call is one request to ENSC: call it at start-up or to pin keys, never
+   * once per delivery. A receiver uses {@link EnscClient.webhookKeyCache}.
    */
   static fetchPublicKeys(options?: FetchPublicKeysOptions): Promise<Record<string, string>> {
     return fetchEnscPublicKeys(options);
+  }
+
+  /**
+   * ENSC's webhook signing keys, kept between deliveries. Create one per
+   * process and pass `await cache.get(headers)` to `constructEvent` as
+   * `publicKey`. The key document is loaded on first use and again when a
+   * delivery names a key id that is not cached, at most once per interval
+   * (`minRefreshIntervalMs`, a minute by default).
+   */
+  static webhookKeyCache(options?: WebhookKeyCacheOptions): WebhookKeyCache {
+    return createEnscWebhookKeyCache(options);
   }
 }

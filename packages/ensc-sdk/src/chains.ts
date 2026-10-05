@@ -2,43 +2,42 @@
  * Chain identifiers.
  *
  * The ENSC API treats `chain` as a plain string at the request boundary and
- * resolves it at runtime: which chains are actually enabled is a per-deployment
- * operator decision the SDK cannot know statically. `ChainSlug` is a
- * convenience union for editor autocomplete, not an exhaustive guarantee. Any
- * `string` is accepted by the request methods; an unknown or disabled chain
- * comes back as an `ENSC_INVALID_CHAIN` error.
+ * resolves it at runtime. `KNOWN_CHAINS` lists every chain the API can serve;
+ * which of them a deployment has switched on is decided at the API, and a
+ * chain that is not switched on comes back as an `ENSC_INVALID_CHAIN` error,
+ * as an unknown one does. `ChainSlug` is a convenience union for editor
+ * autocomplete, not a promise that a chain is available. Any `string` is
+ * accepted by the request methods.
  *
  * Conversions run on the converter chains: `celo` for live keys and
  * `celo-sepolia` for test keys. The environment of the API key selects the
  * chain family; a live key cannot name a testnet and vice versa.
  *
- * `KNOWN_CHAINS` is kept in sync with the platform's chain registry by a test
- * that lives with the registry, outside this package; the SDK carries chain
- * slugs only, never contract addresses.
+ * The SDK carries chain slugs only, never contract addresses.
  */
 
-/** Mainnet chains ENSC can be deployed to. */
+/** Mainnet chains the API can serve (with a live key). */
 export const MAINNET_CHAINS = [
   'celo',
   'base',
   'polygon',
   'optimism',
-  'ethereum',
   'arbitrum',
   'bsc',
   'mode',
+  'plume',
 ] as const;
 
-/** Testnet chains ENSC can be deployed to. */
+/** Testnet chains the API can serve (with a test key). */
 export const TESTNET_CHAINS = [
   'celo-sepolia',
   'base-sepolia',
   'polygon-amoy',
   'optimism-sepolia',
-  'sepolia',
   'arbitrum-sepolia',
   'bsc-testnet',
   'mode-sepolia',
+  'plume-testnet',
 ] as const;
 
 /** Every chain slug the SDK knows about at build time. */

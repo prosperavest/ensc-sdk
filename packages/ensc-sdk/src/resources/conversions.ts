@@ -21,8 +21,8 @@
  */
 
 import type * as api from '@ensc/api-schemas';
+import type { HttpClient, ListParams } from '@ensc/sdk-core';
 import type { ChainInput, Pair } from '../chains.js';
-import type { HttpClient, ListParams } from '../http.js';
 
 export type ConversionType = api.ConversionType;
 export type ConversionStatus = api.ConversionStatus;

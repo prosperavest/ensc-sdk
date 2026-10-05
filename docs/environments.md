@@ -10,7 +10,7 @@ ENSC has two environments, Sandbox and Live. Your API key selects the environmen
 | IP allowlist | optional | required, 1 to 32 addresses or CIDRs |
 | Credentials | its own API key, encryption key and signing key | its own set; nothing is shared with Sandbox |
 
-A Sandbox key can never touch Live resources and a Live key can never touch Sandbox resources (`ENSC_TEST_LIVE_MISMATCH`). Naming a chain from the other environment answers `ENSC_INVALID_CHAIN`.
+A Sandbox key can never touch Live resources and a Live key can never touch Sandbox resources (`ENSC_TEST_LIVE_MISMATCH`). Naming a chain from the other environment answers `ENSC_INVALID_CHAIN`. Lists made with a key (credentials, allowed origins, webhook endpoints, events) hold what belongs to the key's own environment.
 
 ## Chains
 
@@ -24,9 +24,20 @@ Conversions run on one converter chain per environment:
 | Pair tokens (`USDC`, `USDT`, `CELO`) | test tokens listed on the test converter | the real tokens |
 | Gas | testnet CELO | CELO |
 
-The wallet you name on a conversion must hold the token it sends and enough native CELO for gas on that chain. `GET /v1/balance` reads any whitelisted asset on any enabled chain of your environment.
+The wallet you name on a conversion must hold the token it sends and enough native CELO for gas on that chain.
 
-Other chains in the registry (`base`, `polygon`, `optimism`, `ethereum`, `arbitrum`, `bsc`, `mode` and their testnets `base-sepolia`, `polygon-amoy`, `optimism-sepolia`, `sepolia`, `arbitrum-sepolia`, `bsc-testnet`, `mode-sepolia`) carry the ENSC token only: `balance` and `transfer` work where ENSC is deployed and the chain is enabled for your environment, and `POST /v1/conversions` answers `ENSC_CONVERTER_UNAVAILABLE`.
+### Every chain the API can serve
+
+| | Sandbox (test keys) | Live (live keys) |
+|---|---|---|
+| Conversions, balances and transfers | `celo-sepolia` | `celo` |
+| Balances and transfers only | `base-sepolia`, `polygon-amoy`, `optimism-sepolia`, `arbitrum-sepolia`, `bsc-testnet`, `mode-sepolia`, `plume-testnet` | `base`, `polygon`, `optimism`, `arbitrum`, `bsc`, `mode`, `plume` |
+
+These sixteen slugs are the whole list; any other slug, `ethereum` and `sepolia` included, answers `ENSC_INVALID_CHAIN`.
+
+Being on the list does not mean a chain is switched on. Each chain is enabled for an environment separately, and a chain that is not enabled answers `400 ENSC_INVALID_CHAIN`, exactly as an unknown slug does. Do not assume all sixteen are available: call `GET /v1/balance` on the chain you intend to use, and treat `ENSC_INVALID_CHAIN` as "not available here".
+
+On the chains of the second row ENSC is a token only: `GET /v1/balance` and `POST /v1/transfer` work there, and `POST /v1/conversions` answers `ENSC_CONVERTER_UNAVAILABLE`. Conversions exist only on `celo` and `celo-sepolia`.
 
 ## The sandbox bank rail
 
@@ -44,7 +55,9 @@ Transaction screening applies in both environments; screening statuses and holds
 
 ## Exercising webhooks
 
-`POST /v1/test-data/events` (`ensc.testEvents.emit`, with your Sandbox or Live key) writes a synthetic event of the type you name into your Sandbox webhook stream with a realistic payload, delivered and signed exactly like a real one. Use it to test every `conversion.*` and `payout.*` handler before you can produce the real event. Synthetic events are always Sandbox events and are only ever delivered to Sandbox endpoints. `POST /v1/webhook-endpoints/{id}/test` (`ensc.webhookEndpoints.sendTest`) queues one event in that endpoint's environment instead of the whole Sandbox stream. The full receiver guide is [Webhooks](./webhooks.md).
+`POST /v1/test-data/events` (`ensc.testEvents.emit`, with your Sandbox or Live key) writes a synthetic event of the type you name into your Sandbox webhook stream with a realistic payload, delivered and signed like a real one. Use it to test every `conversion.*` and `payout.*` handler before you can produce the real event. Synthetic events are always Sandbox events and are only ever delivered to Sandbox endpoints. `POST /v1/webhook-endpoints/{id}/test` (`ensc.webhookEndpoints.sendTest`) emits one event in that endpoint's environment instead of the whole Sandbox stream: every active endpoint there that subscribes to the type receives it, and `willDeliverToTargetEndpoint` in the response says whether the endpoint you named is among them. A Live endpoint accepts only `synthetic.test_event`.
+
+Every delivery carries, in its signed body, the `merchantId` and the `env` it belongs to, and a test delivery carries `synthetic: true`. A receiver checks the first two against its own and, in Live, ignores synthetic events. The full receiver guide is [Webhooks](./webhooks.md).
 
 ## Moving to Live
 

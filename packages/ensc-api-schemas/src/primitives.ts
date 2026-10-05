@@ -1,7 +1,7 @@
 /**
  * Shared Zod primitives, re-exported by `index.ts`. Kept in their own module so
- * the bundler initialises them before any schema that references them at
- * module-load time.
+ * they are initialised before any schema that references them at module-load
+ * time.
  *
  * Keep this file tiny. Anything bigger than a primitive Zod schema belongs in
  * a feature-specific module.
@@ -15,14 +15,80 @@ export const evmAddressSchema = z
   .regex(/^0x[a-fA-F0-9]{40}$/, 'Must be a 0x-prefixed 40-char hex address')
   .transform((v) => v.toLowerCase() as `0x${string}`);
 
-/** Decimal amount as string (e.g. "100", "0.001"). Validated, not converted here. */
+/**
+ * An amount in major units, as a decimal string (e.g. "100", "0.001"), in
+ * canonical decimal form only: digits, at most one point, no sign, exponent,
+ * hex, comma, whitespace or leading zero ("1e2", "0x10", "+5", "007", " 5" are
+ * refused), at most 18 digits either side of the point. The amount is parsed
+ * exactly (BigInt, never a float); what each asset can hold is checked with
+ * `amountWithinAsset` where the request names the asset.
+ */
 export const decimalAmountSchema = z
   .string()
-  .max(60, 'Amount is too long')
-  .regex(/^\d+(\.\d+)?$/, 'Must be a decimal string with no commas or signs')
-  .refine((v) => (v.split('.')[0] ?? '').replace(/^0+/, '').length <= 40, {
-    message: 'Amount is larger than any supported asset can represent',
-  });
+  .max(40, 'Amount is too long')
+  .regex(
+    /^(0|[1-9]\d{0,17})(\.\d{1,18})?$/,
+    'Must be a plain decimal number: digits and at most one point, no leading zero, sign or exponent',
+  );
+
+/**
+ * What an amount of each asset may be written as: whole digits (above that it
+ * is no amount this system will ever hold) and decimal places (the asset's
+ * own; more would be rounded away when the amount is converted to base units,
+ * so they are refused instead). NGN is the fiat legs' amount (kobo).
+ */
+export const ASSET_AMOUNT_LIMITS = Object.freeze({
+  ENSC: { maxWholeDigits: 15, decimals: 18 },
+  NGN: { maxWholeDigits: 15, decimals: 2 },
+  USDC: { maxWholeDigits: 12, decimals: 6 },
+  USDT: { maxWholeDigits: 12, decimals: 6 },
+  CELO: { maxWholeDigits: 12, decimals: 18 },
+} as const);
+export type AmountAsset = keyof typeof ASSET_AMOUNT_LIMITS;
+
+/** Null when `amount` (already canonical) fits `asset`, else the reason. */
+export function amountWithinAsset(amount: string, asset: AmountAsset): string | null {
+  const limits = ASSET_AMOUNT_LIMITS[asset];
+  const [whole = '', frac = ''] = amount.split('.');
+  if (whole.length > limits.maxWholeDigits) {
+    return `Amount is above the largest ${asset} amount accepted (${limits.maxWholeDigits} whole digits)`;
+  }
+  if (frac.length > limits.decimals) {
+    return `${asset} has ${limits.decimals} decimal places; the amount has ${frac.length}`;
+  }
+  return null;
+}
+
+/**
+ * A whole number written as text, in canonical decimal form only: plain
+ * digits, no sign, exponent, hex, point, space, leading zero or trailing
+ * text, at most 16 digits. "1e2", "0x10", "+5", "007", " 5", "5.0" and
+ * "5abc" do not match, where JavaScript coercion or a lenient parser would
+ * read them as numbers.
+ */
+export const CANONICAL_WHOLE_NUMBER_RE = /^(0|[1-9]\d{0,15})$/;
+
+/**
+ * A whole number from a query string (a page size, a unix time), in canonical
+ * decimal form only (CANONICAL_WHOLE_NUMBER_RE): "1e2", "0x10", "+5", "007",
+ * " 5" and "5.0" are refused, where JavaScript coercion would read them as
+ * numbers. A number (a value built in code) is taken as it is. Bounded by
+ * `min`..`max`.
+ */
+export function queryIntSchema(min: number, max: number) {
+  const bounded = z.number().int().min(min).max(max);
+  return z.union([
+    bounded,
+    z
+      .string()
+      .regex(CANONICAL_WHOLE_NUMBER_RE, 'A whole number in plain decimal digits')
+      .transform(Number)
+      .pipe(bounded),
+  ]);
+}
+
+/** The latest unix time (seconds) a query may name: 9999-12-31T23:59:59Z. */
+export const MAX_UNIX_SECONDS = 253_402_300_799;
 
 export const chainSlugSchema = z.string().min(2).max(40);
 
@@ -52,8 +118,7 @@ export const idempotencyKeySchema = z
 
 /**
  * IPv4 or IPv6 address with an optional CIDR prefix. Matches the check the
- * API applies at request time (api-key-auth ipInCidrs). Single addresses are
- * treated as /32 or /128.
+ * API applies at request time. Single addresses are treated as /32 or /128.
  */
 const IPV4_CIDR_RE =
   /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}(\/(3[0-2]|[12]?\d))?$/;
@@ -79,28 +144,68 @@ export const cidrSchema = z
 export const ipAllowlistSchema = z.array(cidrSchema).min(1).max(32);
 
 /**
- * Merchant webhook endpoint URL. HTTPS only, a real hostname (no IP literal,
- * no localhost, no single-label host), no credentials in the URL. The
- * deliverer POSTs to it from ENSC's network, so this is also the SSRF
- * guard for the platform.
+ * Host names that never denote a public host: the special-use names
+ * (localhost, local, internal, home.arpa) and the ones private networks
+ * commonly use. A webhook host that is one of them, or under one, is refused.
+ */
+export const WEBHOOK_PRIVATE_NAME_SUFFIXES: readonly string[] = [
+  'localhost',
+  'local',
+  'internal',
+  'home.arpa',
+  'lan',
+  'home',
+  'corp',
+];
+
+/** The platform's own domain: a webhook is never sent to a host under it. */
+export const WEBHOOK_OWN_DOMAINS: readonly string[] = ['prosperavest.com'];
+
+/** The longest webhook endpoint URL accepted. */
+export const WEBHOOK_URL_MAX_LENGTH = 2048;
+
+/**
+ * Why `rawUrl` cannot be a webhook endpoint, in words for the caller, or null
+ * when it can. The rule: https only, no credentials in the URL, the default
+ * port only, a public host name written without a trailing dot (no address in
+ * any notation, no single-label or private name), and nothing under the
+ * platform's own domain. The same rule is applied again each time an event is
+ * sent, so a URL refused here would never have received a delivery.
+ */
+export function webhookUrlProblem(rawUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return 'Webhook URL must be a valid https:// URL';
+  }
+  if (url.protocol !== 'https:') return 'Webhook URL must be https://';
+  if (url.username || url.password) return 'Webhook URL must not carry a username or password';
+  if (url.port !== '') return 'Webhook URL must use the default https port (443)';
+  const host = url.hostname.toLowerCase();
+  if (host.endsWith('.')) return 'Webhook URL host name must not end in a dot';
+  // The URL parser has already put every numeric spelling of an address into
+  // its plain form, so one check covers them all.
+  if (host.startsWith('[') || host.includes(':') || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    return 'Webhook URL host must be a host name, not an IP address';
+  }
+  const under = (suffix: string) => host === suffix || host.endsWith(`.${suffix}`);
+  if (!host.includes('.') || WEBHOOK_PRIVATE_NAME_SUFFIXES.some(under)) {
+    return 'Webhook URL host must be a public host name';
+  }
+  if (WEBHOOK_OWN_DOMAINS.some(under)) return 'Webhook URL must not point at this platform';
+  return null;
+}
+
+/**
+ * Merchant webhook endpoint URL: what `webhookUrlProblem` accepts, at most
+ * WEBHOOK_URL_MAX_LENGTH characters. A URL that could never receive a
+ * delivery is refused when it is registered, with the reason.
  */
 export const webhookUrlSchema = z
   .url()
-  .max(2048)
-  .refine((v) => {
-    let u: URL;
-    try {
-      u = new URL(v);
-    } catch {
-      return false;
-    }
-    if (u.protocol !== 'https:') return false;
-    if (u.username || u.password) return false;
-    const host = u.hostname.toLowerCase();
-    if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local'))
-      return false;
-    if (!host.includes('.')) return false;
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
-    if (host.startsWith('[') || host.includes(':')) return false;
-    return true;
-  }, 'Webhook URL must be https:// with a public hostname');
+  .max(WEBHOOK_URL_MAX_LENGTH)
+  .superRefine((v, ctx) => {
+    const problem = webhookUrlProblem(v);
+    if (problem !== null) ctx.addIssue({ code: 'custom', message: problem });
+  });

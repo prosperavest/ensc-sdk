@@ -1,4 +1,4 @@
-# pnpm workspace and supply-chain policy (same as the platform repository).
+# pnpm workspace and supply-chain policy.
 #
 # minimumReleaseAge: packages published in the last 3 days are not resolved.
 # blockExoticSubdeps: every transitive dependency comes from the registry.

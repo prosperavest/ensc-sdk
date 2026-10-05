@@ -1,8 +1,8 @@
 {
-  "name": "@ensc/api-schemas",
+  "name": "@ensc/sdk-core",
   "private": true,
   "version": "0.1.0",
-  "description": "ENSC public API request and response schemas (zod)",
+  "description": "Client core shared by the ProsperaVest SDKs: configuration, transport with retries, request encryption and signing, sealed-response verification, webhook verification. Bundled into each SDK, never published on its own.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -13,19 +13,28 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "import": "./dist/testing/index.js",
+      "require": "./dist/testing/index.cjs"
     }
   },
   "files": [
     "dist"
   ],
+  "sideEffects": false,
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
-    "zod": "4.6.5"
+    "@ensc/protocol": "workspace:*",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0"
   },
   "devDependencies": {
     "tsup": "8.5.1",

@@ -25,7 +25,7 @@ The body of every write (creating a conversion, reporting its transaction, reque
 { "v": 1, "encKeyId": "enc_…", "iv": "…", "ciphertext": "…", "tag": "…" }
 ```
 
-The encryption is bound to the HTTP method, the path, your merchant id and the key id, so a captured envelope cannot be replayed against another endpoint or another account. ENSC decrypts inside its application code, after TLS termination, and validates the plaintext there. Plaintext bodies are refused; there is no way to turn encryption off.
+The encryption is bound to the HTTP method, the path, your merchant id and the key id, so a captured envelope cannot be replayed against another endpoint or another account. ENSC decrypts the body in the API itself and validates the plaintext there. Plaintext bodies are refused; there is no way to turn encryption off.
 
 ## Layer 2: signed requests
 
@@ -39,7 +39,7 @@ Every successful response is encrypted to your signing key using HPKE (RFC 9180:
 { "v": 1, "enc": "…", "ciphertext": "…" }
 ```
 
-with headers `X-ENSC-Signature`, `X-ENSC-Key-Id`, `X-ENSC-Timestamp`, `X-ENSC-Request-Id`. The SDK checks ENSC's signature against the public keys published at `GET /v1/.well-known/ensc-public-keys.json` before it opens anything, so a forged or substituted response is never parsed. Only your signing private key can open the body: someone holding just your API key learns nothing from the responses.
+with headers `X-ENSC-Signature`, `X-ENSC-Key-Id`, `X-ENSC-Timestamp`, `X-ENSC-Request-Id`. The SDK checks ENSC's signature against the public keys published at `GET /v1/.well-known/ensc-public-keys.json` and the age of the response (300 seconds either side of your clock) before it opens anything, so a response ENSC did not sign is never parsed. Only your signing private key can open the body: someone holding just your API key learns nothing from the responses.
 
 Error responses are not sealed, so a 4xx or 5xx is always readable.
 
@@ -52,7 +52,7 @@ Error responses are not sealed, so a 4xx or 5xx is always readable.
 | API key + signing key | Read responses; sign requests | Get a write accepted (body must be encrypted with your encryption key) |
 | Everything, from an unknown network | Nothing (Live keys are IP-allowlisted) | |
 
-If you suspect any credential has leaked, rotate it from the dashboard. Rotation keeps the old key working for 24 hours so you can roll your deployment; revocation is immediate.
+If you suspect any credential has leaked, rotate it from the dashboard. Rotation keeps the old key working for 24 hours so you can roll your deployment; revocation usually takes effect within a few seconds and always within one minute.
 
 ## Your wallet key stays yours
 
@@ -62,7 +62,7 @@ Bank account details you give for a payout are stored encrypted; ENSC's response
 
 ## Webhooks
 
-Webhooks ENSC sends to you are signed with the same Ed25519 key that signs responses, over the webhook id, the timestamp and the SHA-256 of the raw body (`ENSC-WH-V1`). There is no shared secret to store or rotate. Verify them with `EnscClient.constructEvent()` and the key from `/v1/.well-known/ensc-public-keys.json` before acting on a delivery, and de-duplicate on the event id. Webhook payloads never carry bank account numbers. The receiver guide is [Webhooks](./webhooks.md).
+Webhooks ENSC sends to you are signed with the same Ed25519 key that signs responses, over the webhook id, the timestamp and the SHA-256 of the raw body (`ENSC-WH-V1`). There is no shared secret to store or rotate. The signature proves ENSC sent the delivery; the signed body says whose it is (`merchantId`), in which environment (`env`), and whether it is a test delivery (`synthetic`). Verify with `EnscClient.constructEvent({ body, headers, publicKey, merchantId, env })` and the keys from `/v1/.well-known/ensc-public-keys.json` (`EnscClient.webhookKeyCache()` loads and keeps them; the verifier picks the one named by `X-ENSC-Key-Id`) before acting on a delivery: it refuses a delivery signed for another merchant or for the other environment. In Live, ignore an event whose `synthetic` is `true`, and de-duplicate on the event id. Webhook payloads never carry bank account numbers. The receiver guide is [Webhooks](./webhooks.md).
 
 ## Where this is implemented
 

@@ -9,7 +9,7 @@
  */
 
 import type * as api from '@ensc/api-schemas';
-import type { HttpClient, ListByEnvParams } from '../http.js';
+import type { HttpClient, ListByEnvParams } from '@ensc/sdk-core';
 
 export class ApiKeysResource {
   readonly #http: HttpClient;

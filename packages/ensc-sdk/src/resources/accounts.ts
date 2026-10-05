@@ -6,7 +6,7 @@
  */
 
 import type * as api from '@ensc/api-schemas';
-import type { HttpClient } from '../http.js';
+import type { HttpClient } from '@ensc/sdk-core';
 
 export interface ResolveAccountParams {
   /** Bank code from `banks.list()`. */

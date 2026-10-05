@@ -22,7 +22,7 @@
  * over the envelope bytes (encrypt-then-sign); replay protection (timestamp
  * plus nonce) stays in the signature layer.
  *
- * Primitives: Web Crypto AES-GCM (edge workers, Node 20.19+, Bun, Deno).
+ * Primitives: Web Crypto AES-GCM (edge runtimes, Node 20.19+, Bun, Deno).
  * No cipher code lives in this file; it only frames the standard AEAD.
  */
 
@@ -35,7 +35,11 @@ export const ENVELOPE_IV_BYTES = 12;
 export const ENVELOPE_TAG_BYTES = 16;
 export const ENCRYPTION_KEY_BYTES = 32;
 
-/** Upper bound on the plaintext we will decrypt (matches the API body limit). */
+/**
+ * The largest ciphertext decrypted when a call names no maximum of its own:
+ * 1 MiB, the body limit of the API's routes. A route that takes larger bodies
+ * passes its own limit (`DecryptEnvelopeInput.maxCiphertextBytes`).
+ */
 export const ENVELOPE_MAX_CIPHERTEXT_BYTES = 1_048_576;
 
 export interface EncryptedEnvelope {
@@ -169,18 +173,28 @@ export interface DecryptEnvelopeInput {
   key: Uint8Array;
   envelope: EncryptedEnvelope;
   aad: Uint8Array;
+  /**
+   * The largest ciphertext this call decrypts, in bytes: a whole number of at
+   * least 1. Default ENVELOPE_MAX_CIPHERTEXT_BYTES.
+   */
+  maxCiphertextBytes?: number;
 }
 
 /**
  * Decrypt and authenticate an envelope. Throws EnvelopeError:
  *   MALFORMED       a field is not valid base64url or has the wrong length
- *   TOO_LARGE       ciphertext exceeds ENVELOPE_MAX_CIPHERTEXT_BYTES
+ *   TOO_LARGE       ciphertext exceeds the call's maximum (`maxCiphertextBytes`,
+ *                   default ENVELOPE_MAX_CIPHERTEXT_BYTES)
  *   BAD_KEY         key is not 32 bytes
  *   DECRYPT_FAILED  tag check failed (wrong key, tampered data, or AAD mismatch)
  */
 export async function decryptEnvelope(
   input: DecryptEnvelopeInput,
 ): Promise<Uint8Array<ArrayBuffer>> {
+  const maxCiphertextBytes = input.maxCiphertextBytes ?? ENVELOPE_MAX_CIPHERTEXT_BYTES;
+  if (!Number.isSafeInteger(maxCiphertextBytes) || maxCiphertextBytes < 1) {
+    throw new RangeError('maxCiphertextBytes must be a whole number of at least 1');
+  }
   let iv: Uint8Array<ArrayBuffer>;
   let ct: Uint8Array<ArrayBuffer>;
   let tag: Uint8Array<ArrayBuffer>;
@@ -194,7 +208,7 @@ export async function decryptEnvelope(
   if (iv.length !== ENVELOPE_IV_BYTES || tag.length !== ENVELOPE_TAG_BYTES) {
     throw new EnvelopeError('MALFORMED', 'Envelope iv or tag has the wrong length');
   }
-  if (ct.length > ENVELOPE_MAX_CIPHERTEXT_BYTES) {
+  if (ct.length > maxCiphertextBytes) {
     throw new EnvelopeError('TOO_LARGE', 'Envelope ciphertext exceeds the size limit');
   }
   const key = await importAesKey(input.key, ['decrypt']);

@@ -1,11 +1,12 @@
 # ENSC SDK
 
 Source of [`@ensc/sdk`](https://www.npmjs.com/package/@ensc/sdk), the official
-server-side client for the ENSC API, and of the two packages it bundles.
+server-side client for the ENSC API, and of the three packages it bundles.
 
 | Package | Published | Contents |
 | --- | --- | --- |
-| `packages/ensc-sdk` | yes, as `@ensc/sdk` | The client: typed resources, request encryption, request signing, sealed-response verification, webhook verification, the optional `@ensc/sdk/web3` helper |
+| `packages/ensc-sdk` | yes, as `@ensc/sdk` | The client: typed resources and the optional `@ensc/sdk/web3` helper on the shared client core |
+| `packages/sdk-core` | no, bundled into the SDK | The client core shared by the ProsperaVest SDKs: configuration, transport with retries and idempotency, request encryption and signing, sealed-response verification, webhook verification |
 | `packages/ensc-protocol` | no, bundled into the SDK | The wire protocol: canonical request string and Ed25519 signing, ENSC-ENC-V1 request envelope, ENSC-RESP-V1 sealed responses (HPKE), the error envelope |
 | `packages/ensc-api-schemas` | no, types bundled into the SDK | Request and response schemas of the public API |
 
@@ -36,7 +37,7 @@ pnpm check        # build, typecheck, lint, format check, tests
 ## Releases
 
 1. Bump `packages/ensc-sdk/package.json` and `packages/ensc-sdk/CHANGELOG.md`, merge to `main`.
-2. `git tag sdk-v<version> && git push origin sdk-v<version>`.
+2. `git tag sdk-v<version> && git push origin sdk-v<version>`, on that commit of `main`. A tag on a commit that is not on `main` is refused by the release job.
 3. CI runs the checks, builds the package and stages it on npm (`npm stage publish`).
 4. A maintainer reviews the staged version on npmjs.com and approves it with 2FA.
 

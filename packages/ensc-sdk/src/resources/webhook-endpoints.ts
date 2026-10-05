@@ -5,7 +5,7 @@
  * deliveries with `EnscClient.verifyWebhookSignature(...)`.
  */
 
-import type { HttpClient, ListParams } from '../http.js';
+import type { HttpClient, ListParams } from '@ensc/sdk-core';
 
 export type WebhookEnv = 'test' | 'live';
 export type WebhookEndpointStatus = 'active' | 'disabled';
@@ -15,7 +15,7 @@ export interface CreateWebhookEndpointParams {
   /** Destination URL ENSC POSTs events to. */
   url: string;
   description?: string;
-  /** Event types this endpoint subscribes to (1–64 entries). */
+  /** Event types this endpoint subscribes to (1 to 64 entries). */
   eventTypes: string[];
   /** Optional API version to pin deliveries to. */
   apiVersion?: string;
@@ -88,7 +88,7 @@ export interface SendTestEventResponse {
   deliveredVia: string;
   /**
    * False when this endpoint does not subscribe to `eventType`; `warning` says
-   * so. The event is queued in the endpoint's environment and every active
+   * so. The event is emitted in the endpoint's environment and every active
    * endpoint there that subscribes to the type receives it.
    */
   willDeliverToTargetEndpoint: boolean;
@@ -153,7 +153,7 @@ export class WebhookEndpointsResource {
   }
 
   /**
-   * Queue a signed test event in this endpoint's environment. With an
+   * Emit a signed test event in this endpoint's environment. With an
    * `eventType` from the catalogue and no `payload`, the delivery carries the
    * fields a real event of that type carries. Every active endpoint in that
    * environment subscribed to the type receives it. A Live endpoint accepts

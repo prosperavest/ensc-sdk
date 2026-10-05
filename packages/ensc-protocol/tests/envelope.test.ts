@@ -111,6 +111,46 @@ describe('encryptEnvelope / decryptEnvelope', () => {
     ).rejects.toMatchObject({ code: 'TOO_LARGE' });
   });
 
+  it('a call that names its own maximum decrypts a body above the default, exactly', async () => {
+    const key = generateEncryptionKey();
+    // 2 MiB of plaintext: twice the default maximum.
+    const plaintext = new Uint8Array(2 * 1_048_576);
+    for (let i = 0; i < plaintext.length; i += 4096) plaintext[i] = (i / 4096) % 251;
+    const env = await encryptEnvelope({ key, encKeyId: KEY_ID, plaintext, aad });
+    await expect(decryptEnvelope({ key, envelope: env, aad })).rejects.toMatchObject({
+      code: 'TOO_LARGE',
+    });
+    const opened = await decryptEnvelope({
+      key,
+      envelope: env,
+      aad,
+      maxCiphertextBytes: 4 * 1_048_576,
+    });
+    expect(opened.length).toBe(plaintext.length);
+    expect(opened.every((byte, i) => byte === plaintext[i])).toBe(true);
+  });
+
+  it('the maximum of a call is exact: one byte over is refused, the limit itself is not', async () => {
+    const key = generateEncryptionKey();
+    const env = await encryptEnvelope({ key, encKeyId: KEY_ID, plaintext: '{"a":"bc"}', aad });
+    const size = base64UrlToBytes(env.ciphertext).length;
+    await expect(
+      decryptEnvelope({ key, envelope: env, aad, maxCiphertextBytes: size - 1 }),
+    ).rejects.toMatchObject({ code: 'TOO_LARGE' });
+    const opened = await decryptEnvelope({ key, envelope: env, aad, maxCiphertextBytes: size });
+    expect(new TextDecoder().decode(opened)).toBe('{"a":"bc"}');
+  });
+
+  it('refuses a maximum that is not a whole number of at least 1', async () => {
+    const key = generateEncryptionKey();
+    const env = await encryptEnvelope({ key, encKeyId: KEY_ID, plaintext: '{}', aad });
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        decryptEnvelope({ key, envelope: env, aad, maxCiphertextBytes: bad }),
+      ).rejects.toBeInstanceOf(RangeError);
+    }
+  });
+
   it('uses a fresh IV per call', async () => {
     const key = generateEncryptionKey();
     const a = await encryptEnvelope({ key, encKeyId: KEY_ID, plaintext: '{}', aad });

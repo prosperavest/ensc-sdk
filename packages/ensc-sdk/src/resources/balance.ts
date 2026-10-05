@@ -5,8 +5,8 @@
  */
 
 import type * as api from '@ensc/api-schemas';
+import type { HttpClient } from '@ensc/sdk-core';
 import type { Asset, ChainInput } from '../chains.js';
-import type { HttpClient } from '../http.js';
 
 /** A whitelisted asset symbol the balance endpoint accepts. */
 export type BalanceAsset = Asset;

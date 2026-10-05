@@ -1,26 +1,29 @@
 /**
  * Zod schemas for every API endpoint.
  *
- * These are the single source of truth for request and response shapes. They are:
- *   - Imported by the server (Hono routes validate with them)
- *   - Imported by the SDK (request bodies typed, responses parsed)
- *   - Used to auto-generate the OpenAPI spec
+ * These are the single source of truth for request and response shapes: the
+ * API validates requests with them and the SDK types request bodies and parses
+ * responses with them.
  *
- * RULE: amount fields are STRINGS (decimal). The server parses with BigInt.
- *       This avoids JSON-number precision loss for 18-decimal tokens.
+ * RULE: amount fields are STRINGS (decimal), parsed exactly (BigInt, never a
+ *       float). This avoids JSON-number precision loss for 18-decimal tokens.
  */
 
 import { z } from 'zod';
 
 // =====================================================================================
-// Primitives: defined in a sibling file so tsup's bundle initialises them
-// before any consumer module references them at top-level scope.
+// Primitives: defined in a sibling file so they are initialised before any
+// schema that references them at top-level scope.
 // =====================================================================================
 export {
+  type AmountAsset,
+  ASSET_AMOUNT_LIMITS,
   accountNumberSchema,
+  amountWithinAsset,
   assetSymbolSchema,
   bankCodeSchema,
   bytes32Schema,
+  CANONICAL_WHOLE_NUMBER_RE,
   chainSlugSchema,
   cidrSchema,
   decimalAmountSchema,
@@ -28,13 +31,18 @@ export {
   evmAddressSchema,
   idempotencyKeySchema,
   ipAllowlistSchema,
+  MAX_UNIX_SECONDS,
   pairSymbolSchema,
+  queryIntSchema,
   uintStringSchema,
+  WEBHOOK_URL_MAX_LENGTH,
+  webhookUrlProblem,
   webhookUrlSchema,
 } from './primitives.js';
 
 import {
   accountNumberSchema,
+  amountWithinAsset,
   assetSymbolSchema,
   bankCodeSchema,
   bytes32Schema,
@@ -44,7 +52,9 @@ import {
   evmAddressSchema,
   ipAllowlistSchema,
   pairSymbolSchema,
+  queryIntSchema,
   uintStringSchema,
+  webhookUrlSchema,
 } from './primitives.js';
 
 // =====================================================================================
@@ -93,14 +103,19 @@ export type UnsignedTransaction = z.infer<typeof unsignedTransactionSchema>;
 // Transfer (plain ERC-20 transfer of ENSC)
 // =====================================================================================
 
-export const transferRequestSchema = z.object({
-  from: evmAddressSchema,
-  recipient: evmAddressSchema,
-  amount: decimalAmountSchema,
-  asset: z.literal('ENSC').default('ENSC'),
-  chain: chainSlugSchema,
-  clientReference: z.string().max(128).optional(),
-});
+export const transferRequestSchema = z
+  .object({
+    from: evmAddressSchema,
+    recipient: evmAddressSchema,
+    amount: decimalAmountSchema,
+    asset: z.literal('ENSC').default('ENSC'),
+    chain: chainSlugSchema,
+    clientReference: z.string().max(128).optional(),
+  })
+  .superRefine((v, ctx) => {
+    const tooBig = amountWithinAsset(v.amount, 'ENSC');
+    if (tooBig) ctx.addIssue({ code: 'custom', path: ['amount'], message: tooBig });
+  });
 
 export const transferResponseSchema = z.object({
   unsignedTransaction: unsignedTransactionSchema,
@@ -248,6 +263,12 @@ export const createConversionRequestSchema = z
     metadata: conversionMetadataSchema.optional(),
   })
   .superRefine((v, ctx) => {
+    // What the amount is in: the pair paid in (crypto-issue), ENSC redeemed
+    // (crypto-redeem), NGN at 2 dp (fiat legs, ENSC 1:1).
+    const amountAsset =
+      v.type === 'crypto-issue' ? v.pair : v.type === 'crypto-redeem' ? 'ENSC' : 'NGN';
+    const tooBig = amountAsset ? amountWithinAsset(v.amount, amountAsset) : null;
+    if (tooBig) ctx.addIssue({ code: 'custom', path: ['amount'], message: tooBig });
     const crypto = v.type === 'crypto-issue' || v.type === 'crypto-redeem';
     if (crypto && !v.pair) {
       ctx.addIssue({
@@ -327,7 +348,6 @@ export const voucherWireSchema = z.object({
 export const issuedVoucherSchema = z.object({
   voucher: voucherWireSchema,
   signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/),
-  signer: evmAddressSchema,
   domain: z.object({
     name: z.literal('ENSCConverter'),
     version: z.literal('1'),
@@ -355,10 +375,29 @@ export const paymentInstructionsSchema = z.object({
   currency: z.literal('NGN'),
   expiresAt: z.string().nullable(),
   note: z.string().nullable(),
-  /** The reference the payer may see on the provider's side. */
+  /**
+   * The conversion's own reference (the same value as the conversion's
+   * `reference`). The field keeps its earlier name; no other reference is
+   * answered here.
+   */
   providerReference: z.string(),
 });
 export type PaymentInstructions = z.infer<typeof paymentInstructionsSchema>;
+
+/**
+ * A conversion's transaction screening status. SKIPPED: the conversion was
+ * not screened, or screening did not complete, and it was let through;
+ * neither is an approval.
+ */
+export const SCREENING_STATUSES = [
+  'APPROVED',
+  'IN_REVIEW',
+  'DECLINED',
+  'AWAITING_USER',
+  'SKIPPED',
+] as const;
+export const screeningStatusSchema = z.enum(SCREENING_STATUSES);
+export type ScreeningStatus = z.infer<typeof screeningStatusSchema>;
 
 export const conversionStageSchema = z.object({
   name: z.string(),
@@ -386,7 +425,8 @@ export const conversionSchema = z.object({
   fiatAmountNgn: z.string().nullable(),
   usdValueCents: z.number().int().nullable(),
   screening: z.object({
-    status: z.enum(['APPROVED', 'IN_REVIEW', 'DECLINED', 'AWAITING_USER', 'SKIPPED']),
+    /** SKIPPED: the conversion was not screened (or screening did not complete) and was let through. */
+    status: screeningStatusSchema,
   }),
   voucher: issuedVoucherSchema.nullable(),
   paymentInstructions: paymentInstructionsSchema.nullable(),
@@ -443,12 +483,17 @@ export const conversionEventRequestSchema = z
   });
 export type ConversionEventRequest = z.infer<typeof conversionEventRequestSchema>;
 
-export const quoteRequestSchema = z.object({
-  type: z.enum(['crypto-issue', 'crypto-redeem']),
-  chain: chainSlugSchema,
-  pair: pairSymbolSchema,
-  amount: decimalAmountSchema,
-});
+export const quoteRequestSchema = z
+  .object({
+    type: z.enum(['crypto-issue', 'crypto-redeem']),
+    chain: chainSlugSchema,
+    pair: pairSymbolSchema,
+    amount: decimalAmountSchema,
+  })
+  .superRefine((v, ctx) => {
+    const tooBig = amountWithinAsset(v.amount, v.type === 'crypto-issue' ? v.pair : 'ENSC');
+    if (tooBig) ctx.addIssue({ code: 'custom', path: ['amount'], message: tooBig });
+  });
 
 export const quoteResponseSchema = z.object({
   type: z.enum(['crypto-issue', 'crypto-redeem']),
@@ -472,13 +517,13 @@ export type QuoteResponse = z.infer<typeof quoteResponseSchema>;
 
 export const screeningStatusResponseSchema = z.object({
   reference: z.string(),
-  status: z.enum(['APPROVED', 'IN_REVIEW', 'DECLINED', 'AWAITING_USER', 'SKIPPED']),
+  status: screeningStatusSchema,
   updatedAt: z.number().int().nullable(),
 });
 export type ScreeningStatusResponse = z.infer<typeof screeningStatusResponseSchema>;
 
 // =====================================================================================
-// API Keys (CRUD via merchant dashboard, not via SDK)
+// API keys (managed in the dashboard, not through the SDK)
 // =====================================================================================
 
 export const createApiKeyRequestSchema = z.object({
@@ -555,7 +600,15 @@ export type RotateApiKeyResponse = z.infer<typeof rotateApiKeyResponseSchema>;
 
 export const createAllowedOriginRequestSchema = z.object({
   env: envSchema,
-  /** Exact origin (https://example.com) or 'regex:^https://.*\\.example\\.com$' */
+  /**
+   * An exact origin in canonical form (`https://example.com`: lowercase host,
+   * no path, no default port), one wildcard host label in place of the first
+   * label (`https://*.example.com`, at least two labels after the star), or a
+   * pattern (`regex:^https://[a-z0-9-]+\\.example\\.com$`). A pattern is a
+   * scheme, lowercase host labels joined by `\\.`, at most one wildcard label
+   * (`[a-z0-9-]+`, `[a-z0-9]+` or `[a-z]+`, not one of the last two labels)
+   * and an optional port: no group, alternation or other repetition.
+   */
   origin: z.string().min(1).max(512),
 });
 
@@ -681,7 +734,7 @@ export const encryptedRequestEnvelopeSchema = z
     iv: z.string().regex(/^[A-Za-z0-9_-]{16}$/),
     /**
      * base64url of at most 1 MiB of ciphertext. The length lives in min/max,
-     * not in the regex quantifier: edge schema validators refuse a repetition
+     * not in the regex quantifier: some schema validators refuse a repetition
      * bound that large.
      */
     ciphertext: z
@@ -724,3 +777,168 @@ export const publicKeysResponseSchema = z.object({
   ),
 });
 export type PublicKeysResponse = z.infer<typeof publicKeysResponseSchema>;
+
+// =====================================================================================
+// Webhooks: endpoints, the event log and synthetic test events. One shape for
+// every product API (the ENSC API and the Vaults API serve the same routes);
+// the event types themselves are each product's own.
+// =====================================================================================
+
+export const webhookEndpointStatusSchema = z.enum(['active', 'disabled']);
+export type WebhookEndpointStatus = z.infer<typeof webhookEndpointStatusSchema>;
+
+/** One subscribed event type, or `*` for every type the product emits. */
+export const webhookEventTypeSchema = z.string().min(1).max(64);
+export const webhookEventTypesSchema = z.array(webhookEventTypeSchema).min(1).max(64);
+
+export const webhookEndpointSchema = z.object({
+  id: z.string(),
+  env: envSchema,
+  url: z.string(),
+  description: z.string().nullable(),
+  eventTypes: z.array(z.string()),
+  /** The API version every delivery to this endpoint is pinned to. */
+  apiVersion: z.string(),
+  status: webhookEndpointStatusSchema,
+  createdAt: z.number().int(),
+});
+export type WebhookEndpoint = z.infer<typeof webhookEndpointSchema>;
+
+export const createWebhookEndpointRequestSchema = z.object({
+  env: envSchema,
+  url: webhookUrlSchema,
+  description: z.string().max(500).optional(),
+  eventTypes: webhookEventTypesSchema,
+  /** Pin an API version; the product's current version when omitted. */
+  apiVersion: z.string().min(1).max(32).optional(),
+});
+export type CreateWebhookEndpointRequest = z.infer<typeof createWebhookEndpointRequestSchema>;
+
+export const createWebhookEndpointResponseSchema = webhookEndpointSchema.extend({
+  status: z.literal('active'),
+});
+export type CreateWebhookEndpointResponse = z.infer<typeof createWebhookEndpointResponseSchema>;
+
+export const listWebhookEndpointsQuerySchema = z.object({
+  env: envSchema.optional(),
+  limit: queryIntSchema(1, 200).optional(),
+  cursor: z.string().optional(),
+});
+export const listWebhookEndpointsResponseSchema = z.object({
+  endpoints: z.array(webhookEndpointSchema),
+  pagination: paginationSchema,
+});
+export type ListWebhookEndpointsResponse = z.infer<typeof listWebhookEndpointsResponseSchema>;
+
+export const updateWebhookEndpointRequestSchema = z.object({
+  url: webhookUrlSchema.optional(),
+  description: z.string().max(500).optional(),
+  eventTypes: webhookEventTypesSchema.optional(),
+  status: webhookEndpointStatusSchema.optional(),
+});
+export type UpdateWebhookEndpointRequest = z.infer<typeof updateWebhookEndpointRequestSchema>;
+
+export const updateWebhookEndpointResponseSchema = z.object({
+  id: z.string(),
+  updated: z.array(z.string()),
+});
+export type UpdateWebhookEndpointResponse = z.infer<typeof updateWebhookEndpointResponseSchema>;
+
+export const removeWebhookEndpointResponseSchema = z.object({
+  id: z.string(),
+  deleted: z.literal(true),
+});
+export type RemoveWebhookEndpointResponse = z.infer<typeof removeWebhookEndpointResponseSchema>;
+
+/** The event type a test delivery sends when none is named, and the only one a live endpoint accepts. */
+export const SYNTHETIC_TEST_EVENT_TYPE = 'synthetic.test_event';
+
+export const sendTestEventRequestSchema = z.object({
+  eventType: webhookEventTypeSchema.default(SYNTHETIC_TEST_EVENT_TYPE),
+  /** Echoed as the event payload; omitted, a catalogue type carries its realistic sample. */
+  payload: z.record(z.string(), z.unknown()).optional(),
+});
+export type SendTestEventRequest = z.input<typeof sendTestEventRequestSchema>;
+
+export const sendTestEventResponseSchema = z.object({
+  eventId: z.string(),
+  endpointId: z.string(),
+  eventType: z.string(),
+  scheduled: z.literal(true),
+  deliveredVia: z.literal('background'),
+  /** False when this endpoint is not subscribed to the type (others in the environment may be). */
+  willDeliverToTargetEndpoint: z.boolean(),
+  warning: z.string().nullable(),
+});
+export type SendTestEventResponse = z.infer<typeof sendTestEventResponseSchema>;
+
+export const webhookEventStatusSchema = z.enum(['created', 'in_flight', 'dispatched', 'abandoned']);
+export type WebhookEventStatus = z.infer<typeof webhookEventStatusSchema>;
+
+export const webhookDeliveryStatusSchema = z.enum(['pending', 'delivered', 'failed', 'gave_up']);
+export type WebhookDeliveryStatus = z.infer<typeof webhookDeliveryStatusSchema>;
+
+export const eventSummarySchema = z.object({
+  id: z.string(),
+  env: envSchema,
+  eventType: z.string(),
+  apiVersion: z.string(),
+  status: webhookEventStatusSchema,
+  createdAt: z.number().int(),
+  dispatchedAt: z.number().int().nullable(),
+  payload: z.unknown(),
+});
+export type EventSummary = z.infer<typeof eventSummarySchema>;
+
+export const listEventsQuerySchema = z.object({
+  env: envSchema.optional(),
+  type: webhookEventTypeSchema.optional(),
+  limit: queryIntSchema(1, 200).optional(),
+  cursor: z.string().optional(),
+});
+export const listEventsResponseSchema = z.object({
+  events: z.array(eventSummarySchema),
+  pagination: paginationSchema,
+});
+export type ListEventsResponse = z.infer<typeof listEventsResponseSchema>;
+
+export const eventDeliverySchema = z.object({
+  id: z.string(),
+  endpointId: z.string(),
+  status: webhookDeliveryStatusSchema,
+  responseStatus: z.number().int().nullable(),
+  attempt: z.number().int(),
+  deliveredAt: z.number().int().nullable(),
+  nextAttemptAt: z.number().int().nullable(),
+  createdAt: z.number().int(),
+  /** The first 500 characters of the endpoint's answer, or the network error. */
+  responseSnippet: z.string().nullable(),
+});
+export type EventDelivery = z.infer<typeof eventDeliverySchema>;
+
+export const eventDetailSchema = eventSummarySchema.extend({
+  deliveries: z.array(eventDeliverySchema),
+});
+export type EventDetail = z.infer<typeof eventDetailSchema>;
+
+export const triggerTestEventRequestSchema = z.object({
+  eventType: webhookEventTypeSchema,
+  /** Merged over the sample payload of the type. */
+  overrides: z.record(z.string(), z.unknown()).optional(),
+});
+export type TriggerTestEventRequest = z.infer<typeof triggerTestEventRequestSchema>;
+
+export const triggerTestEventResponseSchema = z.object({
+  eventId: z.string(),
+  eventType: z.string(),
+  env: z.literal('test'),
+  payload: z.unknown(),
+  scheduled: z.literal(true),
+  supportedEvents: z.array(z.string()),
+});
+export type TriggerTestEventResponse = z.infer<typeof triggerTestEventResponseSchema>;
+
+export const testEventCatalogueResponseSchema = z.object({
+  supported: z.array(z.object({ eventType: z.string(), samplePayload: z.unknown() })),
+});
+export type TestEventCatalogueResponse = z.infer<typeof testEventCatalogueResponseSchema>;
