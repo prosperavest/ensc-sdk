@@ -7,6 +7,10 @@
  * 2026-09-15 introduced mandatory request encryption (ENSC-ENC-V1), sealed and
  * signed responses (ENSC-RESP-V1), mandatory IP allowlists on live keys and
  * 24-hour key rotation overlaps.
+ *
+ * ENSC-V2 and ENSC-RESP-V2 (5 October 2026) did not bump it: a request asks
+ * for them with a header, and a request that does not is signed, verified and
+ * answered as before, so nothing changed under a client pinned to 2026-09-15.
  */
 export const CURRENT_API_VERSION = '2026-09-15' as const;
 

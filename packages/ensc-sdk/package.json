@@ -1,6 +1,6 @@
 {
   "name": "@ensc/sdk",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Official ENSC API client SDK: typed, server-side, with automatic request encryption, Ed25519 signing and sealed-response verification",
   "license": "Apache-2.0",
   "repository": {

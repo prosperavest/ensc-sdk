@@ -17,6 +17,7 @@ describe('mutation signing (encrypt-then-sign)', () => {
     expect(headers['x-ensc-key-id']).toBe(srv.fx.signingKeyId);
     expect(headers['x-ensc-signature']).toMatch(/^ed25519=/);
     expect(headers['x-ensc-idempotency-key']).toBeDefined();
+    expect(headers['x-ensc-response-nonce']).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it('produces a signature over the encrypted envelope that verifies with @ensc/protocol', async () => {
@@ -36,6 +37,8 @@ describe('mutation signing (encrypt-then-sign)', () => {
     const headers = srv.calls[0]?.headers ?? {};
     expect(headers['x-ensc-key-id']).toBe(srv.fx.signingKeyId);
     expect(headers['x-ensc-signature']).toBeUndefined();
+    // A read is not signed, and still says which answer it will accept.
+    expect(headers['x-ensc-response-nonce']).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   it('re-signs each retry with a fresh nonce but a stable idempotency key and body', async () => {
@@ -57,6 +60,7 @@ describe('mutation signing (encrypt-then-sign)', () => {
     expect(srv.calls).toHaveLength(2);
     const [a, b] = srv.calls;
     expect(a?.headers['x-ensc-nonce']).not.toBe(b?.headers['x-ensc-nonce']);
+    expect(a?.headers['x-ensc-response-nonce']).not.toBe(b?.headers['x-ensc-response-nonce']);
     expect(a?.headers['x-ensc-idempotency-key']).toBe(b?.headers['x-ensc-idempotency-key']);
     // The envelope is built once per logical request and re-signed per attempt
     // (timestamp and nonce must be fresh; the ciphertext need not be).

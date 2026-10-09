@@ -74,7 +74,7 @@ export type EnscErrorCode =
   | 'ENSC_PROVIDER_ERROR'
   | 'ENSC_PROVIDER_RATE_LIMITED'
   | 'ENSC_ACCOUNT_RESOLUTION_FAILED'
-  // Payload encryption (ENSC-ENC-V1 request envelope, ENSC-RESP-V1 sealed response)
+  // Payload encryption (ENSC-ENC-V1 request envelope, ENSC-RESP-V1 and V2 sealed response)
   | 'ENSC_ENCRYPTION_REQUIRED'
   | 'ENSC_DECRYPTION_FAILED'
   | 'ENSC_UNKNOWN_ENCRYPTION_KEY'

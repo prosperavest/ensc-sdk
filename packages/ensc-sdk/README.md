@@ -25,7 +25,7 @@ The dashboard issues all six values together when you generate keys (Sandbox onc
 | `apiKey` | **yes** | `Authorization: Bearer`. Identifies the merchant, carries env + scopes. `ensc_live_sk_…` or `ensc_test_sk_…`. |
 | `encryptionKey` | **yes** | 32-byte AES-256-GCM key, base64url. Encrypts every request body before it leaves your server (ENSC-ENC-V1). |
 | `encryptionKeyId` | no | The `enc_…` id of that key. Travels inside the envelope so the API knows which key to decrypt with. |
-| `signingPrivateKey` | **yes** | Ed25519 seed, base64url. Signs every write (ENSC-V1) and is the key every sealed response is opened with (ENSC-RESP-V1). |
+| `signingPrivateKey` | **yes** | Ed25519 seed, base64url. Signs every write (ENSC-V2) and is the key every sealed response is opened with (ENSC-RESP-V2). |
 | `signingKeyId` | no | The id of the registered public key. Sent as `X-ENSC-Key-Id` on every request. |
 | `merchantId` | no | `mrc_…`. Bound into every signature and every encrypted envelope. |
 
@@ -33,7 +33,8 @@ What happens on the wire, for every call:
 
 1. **Writes** are serialized to JSON, encrypted with `encryptionKey` into an envelope bound to the method, path, merchant and key id, then the envelope bytes are signed with `signingPrivateKey`. The API refuses plaintext merchant writes; there is no downgrade.
 2. **Every successful response** arrives sealed to your signing key (HPKE, RFC 9180: X25519 + HKDF-SHA256 + ChaCha20-Poly1305) and signed by ENSC. The SDK verifies ENSC's signature against the published key set, checks the timestamp window, and only then opens the body. A response that is not sealed, not signed, or sealed to another key is rejected.
-3. **Errors** are never sealed, so a 4xx/5xx is always readable and maps to a typed `EnscError`.
+3. **Every response is checked against the request it answers.** The SDK sends a fresh random value with every call, reads included (`X-ENSC-Response-Nonce`), and ENSC signs and seals the response for that value, for the method, path and query of the call, and for your own merchant id and signing key id. A response made for another request or for another account, or played back from an earlier call, does not verify and is rejected, and so is a response that names no request (`details.reason` `response_not_bound`). On a write the value is part of what you sign.
+4. **Errors** are never sealed, so a 4xx/5xx is always readable and maps to a typed `EnscError`.
 
 ENSC's response-signing public keys are fetched once per `EnscClient` from `GET /v1/.well-known/ensc-public-keys.json` and cached; they are loaded before the first write is sent, so a write is never carried out and then reported as failed for want of a key. To remove that dependency, pin them with `enscPublicKeys: { [kid]: publicKey }`; with pinned keys there is no fetch, so update the pin when ENSC announces a new key.
 
@@ -133,7 +134,7 @@ Every piece of calldata ENSC returns has the same shape: `{ from, to, data, valu
 
 `signAndBroadcast` estimates gas first, without fee fields, and sends with that estimate plus 30 percent (`gasMarginPercent`), or with the limit you pass as `gas`. Do not skip the limit when signing with your own infrastructure: without one, some nodes estimate at the block gas limit and charge that much gas up front during the simulation. On Celo the native balance is also the CELO ERC-20 balance, so a converter call that pulls CELO then sees an almost empty wallet and reverts with `transfer value exceeded balance of sender` unless the wallet holds several CELO more than the amount.
 
-If the estimate fails, nothing is broadcast and the node's reason is in the `ENSC_UPSTREAM_FAILED` message. Report the conversion failed (`events.failed`) so it does not linger. A `fiat-issue` whose payment has been received cannot be reported failed (`409 ENSC_INVALID_STATE`, `details.reason` `payment_received`): ask for a new voucher instead. A `fiat-issue` that failed and is paid afterwards moves to `requires_manual_review` (`conversion.requires_manual_review`) and is resolved by ENSC. The helper's error messages never contain the RPC URL you passed, which usually carries an access key.
+If the estimate fails, nothing is broadcast and the node's reason is in the `ENSC_UPSTREAM_FAILED` message. To try again, ask for a new voucher. To give up, report the conversion failed (`events.failed`): it is accepted once the voucher has expired. Until then it answers `409 ENSC_INVALID_STATE` with `details.reason` `voucher_live` and `details.retryAfterSeconds`; wait that long and report again. If the voucher was executed after all, the answer is `details.reason` `voucher_used`: report the transaction with `events.confirmed` instead. A `fiat-issue` whose payment has been received cannot be reported failed (`details.reason` `payment_received`): ask for a new voucher instead. A `fiat-issue` that failed and is paid afterwards moves to `requires_manual_review` (`conversion.requires_manual_review`) and is resolved by ENSC. The helper's error messages never contain the RPC URL you passed, which usually carries an access key.
 
 A hash you reported can be replaced until a receipt is verified: report `submitted` or `confirmed` again with the right one. When the transaction you reported is dead (it reverted, or the network never saw it and its voucher has expired), `events.confirmed` throws `ENSC_SETTLEMENT_VERIFICATION_FAILED` with `details.voucherReissuable` `true`: call `voucher(reference)` for a new voucher, sign it and report again.
 
@@ -221,19 +222,19 @@ try {
 }
 ```
 
-Codes the SDK itself raises on the response path: `ENSC_INVALID_SIGNATURE` (response not signed by a known ENSC key, outside the timestamp window, or an empty 2xx body), `ENSC_DECRYPTION_FAILED` (sealed body could not be opened with your signing key, usually a mismatched `signingKeyId`/`signingPrivateKey` pair) and `ENSC_UPSTREAM_FAILED` (a network error or timeout, an unreadable body, a redirect, or a non-ENSC answer from a gateway).
+Codes the SDK itself raises on the response path: `ENSC_INVALID_SIGNATURE` (response not signed by a known ENSC key, not signed for the request that was sent, outside the timestamp window, or an empty 2xx body), `ENSC_DECRYPTION_FAILED` (sealed body could not be opened with your signing key, usually a mismatched `signingKeyId`/`signingPrivateKey` pair) and `ENSC_UPSTREAM_FAILED` (a network error or timeout, an unreadable body, a redirect, or a non-ENSC answer from a gateway).
 
 Transient failures (network errors, timeouts, 500, 502, 503 and 504) are retried automatically (`maxRetries`, default 2); 4xx and 429 are never retried, and a redirect is never followed. Every write carries a stable idempotency key across those retries, and the API honours it on every write route, so a transparently retried POST cannot double-execute. Every `EnscError` carries `status` (the HTTP status received), `requestId` (from `X-ENSC-Request-Id`, quote it to support) and, where the API sent them, `details`.
 
-A failed write whose outcome is open carries what you need to settle it:
+A failed write carries what you need to settle it:
 
 | `details` field | Meaning |
 | --- | --- |
-| `idempotencyKey` | The idempotency key the SDK sent. Repeat the call with it and it cannot execute twice. Present on a network failure, a timeout, a 5xx, a redirect, and any failure after a 2xx answer. |
+| `idempotencyKey` | The idempotency key the SDK sent. Repeat the call with it and it cannot execute twice. Present on every failed write, a refusal (4xx) included. |
 | `responseStatus` | The 2xx status ENSC answered with: the request was carried out, but its answer could not be verified or opened. Do not send it again under a new key; read the resource back. |
 | `requestSent` | `false` when ENSC's public keys could not be loaded before the write: nothing was sent. |
 
-A 4xx is ENSC's own refusal and carries none of these. An answer that tells you to retry (`409`, `429`) is not remembered under its idempotency key, so the same key runs the request again.
+A 4xx is normally ENSC's own refusal: nothing was carried out. It carries `idempotencyKey` and neither of the other two. An error response is not signed, so do not repeat a refused write under a new key; tell a refusal from an open outcome by the status (`isClientError(err)`), not by whether the key is there. An answer that tells you to retry (`409`, `429`) is not remembered under its idempotency key, so the same key runs the request again.
 
 ### API version notices
 

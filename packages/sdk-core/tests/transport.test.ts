@@ -222,12 +222,62 @@ describe('what a failed write hands the caller', () => {
     expect(keys[0]).toBe(keys[1]);
   });
 
-  it("a refusal (4xx) is the host's own error, unchanged", async () => {
+  // An error answer is not signed, so a 4xx is not proof that the host
+  // refused the write: the caller is handed the key on every status.
+  it("a refusal (4xx) of a write is the host's own error, with the idempotency key added", async () => {
+    for (const status of [400, 401, 403, 404, 409, 422, 429]) {
+      const h = harness(() => ({
+        status,
+        body: {
+          error: {
+            code: 'ENSC_INVALID_STATE',
+            message: 'no',
+            details: { why: 'x' },
+            requestId: 'req_h',
+          },
+        },
+      }));
+      const err = await h.http.request(write).then(
+        () => undefined,
+        (e: unknown) =>
+          e as {
+            code: string;
+            message: string;
+            status?: number;
+            requestId?: string;
+            details?: Record<string, unknown>;
+          },
+      );
+      const sent = h.host.calls[0]?.headers['x-ensc-idempotency-key'];
+      expect(sent, String(status)).toMatch(/^idm_/);
+      expect(err, String(status)).toMatchObject({
+        code: 'ENSC_INVALID_STATE',
+        message: 'no',
+        status,
+        requestId: 'req_h',
+      });
+      expect(err?.details, String(status)).toEqual({ why: 'x', idempotencyKey: sent });
+      // A refusal is still never sent again.
+      expect(h.host.calls, String(status)).toHaveLength(1);
+    }
+  });
+
+  it('a refusal of a write whose answer has no error body carries the key too', async () => {
+    const h = harness(() => ({ status: 403 }));
+    const caller = 'caller-key-0002';
+    await expect(h.http.request({ ...write, idempotencyKey: caller })).rejects.toMatchObject({
+      code: 'ENSC_FORBIDDEN',
+      status: 403,
+      details: { idempotencyKey: caller },
+    });
+  });
+
+  it("a refusal (4xx) of a read is the host's own error, unchanged", async () => {
     const h = harness(() => ({
       status: 409,
       body: { error: { code: 'ENSC_INVALID_STATE', message: 'no', details: { why: 'x' } } },
     }));
-    const err = await h.http.request(write).then(
+    const err = await h.http.request({ method: 'GET', path: '/v1/things' }).then(
       () => undefined,
       (e: unknown) => e as { details?: Record<string, unknown> },
     );

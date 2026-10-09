@@ -3,7 +3,7 @@
  *
  * One implementation of the wire protocol (configuration and its validation,
  * the transport with retries and idempotency, ENSC-ENC-V1 request encryption,
- * ENSC-V1 request signing, ENSC-RESP-V1 sealed-response verification and
+ * ENSC-V2 request signing, ENSC-RESP-V2 sealed-response verification and
  * opening, ENSC-WH-V1 webhook verification, the error taxonomy), parameterised
  * by an {@link SdkProduct}. `@ensc/sdk` and `@prosperavest/vaults` are each
  * one descriptor plus their resources, and inline this package at build time;
@@ -52,6 +52,7 @@ export type { SdkProduct } from './product.js';
 export {
   generateIdempotencyKey,
   generateNonce,
+  generateResponseNonce,
   type SignatureHeaders,
   type SignMutationInput,
   signMutation,

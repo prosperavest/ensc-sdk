@@ -156,7 +156,20 @@ export class ConversionEventsResource {
     return this.#post(reference, 'onchain_confirmed', { txHash, ...opts });
   }
 
-  /** The wallet did not, or could not, send the transaction. */
+  /**
+   * The wallet did not, or could not, send the transaction. `failed` is
+   * final, so the API accepts it only once no transaction can still settle the
+   * conversion. A conversion with no voucher yet is closed at once. Otherwise
+   * it throws `ENSC_INVALID_STATE` (409) and `details.reason` says what to do:
+   *
+   * - `voucher_live`: the voucher can still be executed. Wait
+   *   `details.retryAfterSeconds` seconds and call `failed` again; until then
+   *   the conversion is pending, not failed.
+   * - `voucher_used`: the voucher was executed on chain. Report that
+   *   transaction with `confirmed(reference, txHash)` instead.
+   * - `payment_received`: a `fiat-issue` whose payment has arrived. Ask for
+   *   a new voucher with `conversions.voucher(reference)`.
+   */
   failed(
     reference: string,
     error?: string,

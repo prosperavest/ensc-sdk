@@ -748,13 +748,15 @@ export const encryptedRequestEnvelopeSchema = z
   .strict();
 
 /**
- * ENSC-RESP-V1: the body of every successful merchant-key response. HPKE
- * (RFC 9180, X25519 + HKDF-SHA256 + ChaCha20-Poly1305) sealed to the merchant's
- * registered public key. Signed by ENSC via X-ENSC-Signature.
+ * The body of every successful merchant-key response. HPKE (RFC 9180, X25519 +
+ * HKDF-SHA256 + ChaCha20-Poly1305) sealed to the merchant's registered public
+ * key. Signed by ENSC via X-ENSC-Signature. `v` is 1 for ENSC-RESP-V1 and 2
+ * for ENSC-RESP-V2, the version a request asks for with the header
+ * X-ENSC-Response-Nonce: it is signed and sealed for that one request.
  */
 export const sealedResponseEnvelopeSchema = z
   .object({
-    v: z.literal(1),
+    v: z.union([z.literal(1), z.literal(2)]),
     /** Ephemeral X25519 public key, base64url (32 bytes, 43 chars). */
     enc: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
     ciphertext: z.string().regex(/^[A-Za-z0-9_-]{22,}$/),

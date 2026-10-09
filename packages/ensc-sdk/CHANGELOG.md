@@ -3,6 +3,53 @@
 All notable changes to `@ensc/sdk`. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 0.6.0
+
+Requires API date version `2026-09-15`, on an API that answers in
+ENSC-RESP-V2. The ENSC API does from 5 October 2026.
+
+### Changed
+
+- A sealed response is now checked against the request it answers. The SDK
+  sends a fresh random value with every call, reads included, in the request
+  header `X-ENSC-Response-Nonce`, and accepts a successful response only if
+  ENSC signed and sealed it for that value, for the method, path and query of
+  the call, and for your own `merchantId` and `signingKeyId` (response version
+  ENSC-RESP-V2). A response ENSC made for another request or for another
+  account, or one played back from an earlier call, is refused with
+  `ENSC_INVALID_SIGNATURE`. Until now the SDK checked that a response was
+  signed by ENSC and recent, not which request it answered. `merchantId` and
+  `signingKeyId` must therefore be your own on reads too; a write already
+  needed them.
+- A response in the earlier version (ENSC-RESP-V1), which names no request, is
+  no longer accepted: `ENSC_INVALID_SIGNATURE` with `details.reason`
+  `response_not_bound`. There is no option that accepts one.
+- A write is signed as ENSC-V2: the ENSC-V1 string under the version line
+  `ENSC-V2`, with the response nonce as one more line, so your signature
+  covers the value. An API that does not verify ENSC-V2 refuses such a write
+  with `ENSC_INVALID_SIGNATURE` (401) and carries nothing out.
+- A retried call sends a new value with each attempt; the idempotency key
+  stays the same, as before.
+- Every failed write carries `details.idempotencyKey`, a refusal (4xx)
+  included. Until now a 4xx did not. An error response is not signed, so the
+  SDK no longer takes a 4xx as proof that nothing was carried out: repeat a
+  write with the key the error names, never under a new one. To tell a refusal
+  from an open outcome, look at the status (`isClientError`), not at whether
+  the key is there.
+- Documentation of `conversions.events.failed`: the API refuses `failed`
+  while the voucher of the conversion can still be executed
+  (`409 ENSC_INVALID_STATE`, `details.reason` `voucher_live`, with
+  `details.retryAfterSeconds`) and after a voucher was executed
+  (`details.reason` `voucher_used`: report `onchain_confirmed` with the
+  transaction hash). No change to the method itself.
+
+Nothing changes in how you call the SDK, in the credentials or in webhook
+verification. Error responses are not sealed, as before; the one change to
+them is the added `details.idempotencyKey` on a refused write. SDK 0.5.0 and earlier keep working unchanged: a request
+without the header is answered in ENSC-RESP-V1, as before. The wire formats
+and test vectors are in `docs/encrypting-decrypting-request.md` and
+`packages/ensc-protocol/tests/response.test.ts`.
+
 ## 0.5.0
 
 Requires API date version `2026-09-15`.

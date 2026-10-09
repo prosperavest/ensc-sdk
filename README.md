@@ -7,7 +7,7 @@ server-side client for the ENSC API, and of the three packages it bundles.
 | --- | --- | --- |
 | `packages/ensc-sdk` | yes, as `@ensc/sdk` | The client: typed resources and the optional `@ensc/sdk/web3` helper on the shared client core |
 | `packages/sdk-core` | no, bundled into the SDK | The client core shared by the ProsperaVest SDKs: configuration, transport with retries and idempotency, request encryption and signing, sealed-response verification, webhook verification |
-| `packages/ensc-protocol` | no, bundled into the SDK | The wire protocol: canonical request string and Ed25519 signing, ENSC-ENC-V1 request envelope, ENSC-RESP-V1 sealed responses (HPKE), the error envelope |
+| `packages/ensc-protocol` | no, bundled into the SDK | The wire protocol: canonical request string and Ed25519 signing (ENSC-V1 and ENSC-V2), ENSC-ENC-V1 request envelope, ENSC-RESP-V1 and ENSC-RESP-V2 sealed responses (HPKE), the error envelope |
 | `packages/ensc-api-schemas` | no, types bundled into the SDK | Request and response schemas of the public API |
 
 Usage, credentials and examples: [`packages/ensc-sdk/README.md`](./packages/ensc-sdk/README.md).

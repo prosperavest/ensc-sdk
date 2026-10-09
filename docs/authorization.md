@@ -73,28 +73,77 @@ X-ENSC-Nonce: <unique per request; the SDK uses 18 random bytes, base64url>
 X-ENSC-Key-Id: sig_…
 X-ENSC-Signature: ed25519=<base64url of the 64-byte signature>
 X-ENSC-Idempotency-Key: <8 to 64 URL-safe characters>
+X-ENSC-Response-Nonce: <32 random bytes as base64url, exactly 43 characters, fresh for every request>
 ```
 
 The signature is Ed25519, with your signing private key, over the UTF-8 bytes of this string (lines joined with a single `\n`):
 
 ```
-ENSC-V1
+ENSC-V2
 {METHOD}                                  upper-case
 {PATH}                                    e.g. /v1/conversions, no query string
-{sha256_hex(canonical query)}             query pairs sorted by key, URL-encoded, joined with &; the hash of the empty string if none
+{sha256_hex(canonical query)}             see "The canonical query" below; the hash of the empty string if there is no query
 {sha256_hex(body bytes)}                  the encrypted envelope exactly as sent; the hash of the empty string if no body
 {timestamp}
 {nonce}
 {merchantId}
 {idempotencyKey}                          empty string if none
+{responseNonce}                           the X-ENSC-Response-Nonce you send
 ```
+
+`X-ENSC-Response-Nonce` asks ENSC to sign and seal its response for this one request (ENSC-RESP-V2, see [Encrypting requests and decrypting responses](./encrypting-decrypting-request.md#response-decryption-ensc-resp-v2)). Signing the value means a write is carried out only with the value you chose.
+
+A write **without** `X-ENSC-Response-Nonce` is signed as ENSC-V1: the same string with `ENSC-V1` as its first line and without the last line. That is what `@ensc/sdk` 0.5.0 and earlier send. It is still accepted, and its response is ENSC-RESP-V1, which is not tied to the request. Use ENSC-V2 in a new integration.
 
 Rules ENSC enforces:
 
 - The timestamp must be within 300 seconds of ENSC's clock (`ENSC_TIMESTAMP_OUT_OF_WINDOW`).
-- A nonce is accepted once (`ENSC_NONCE_REUSED`). Retries must re-sign with a fresh timestamp and nonce.
+- A nonce is accepted once (`ENSC_NONCE_REUSED`). Retries must re-sign with a fresh timestamp and nonce, and send a fresh response nonce.
 - The key id must be one of your signing keys (`ENSC_MISSING_PUBLIC_KEY` if it is not), and that key must be active or rotated less than 24 hours ago (`ENSC_INVALID_SIGNATURE` otherwise).
-- Reads (`GET`) are not signed.
+- The version follows the header. With `X-ENSC-Response-Nonce` the signature must be over the ENSC-V2 string with exactly that value; without it, over the ENSC-V1 string. A write whose header was added, taken away or changed after it was signed does not verify (`ENSC_INVALID_SIGNATURE`) and is not carried out.
+- A response nonce that is not 43 base64url characters is refused (`400 ENSC_VALIDATION_FAILED`), on reads and writes alike.
+- Reads (`GET`) are not signed. Send `X-ENSC-Response-Nonce` on reads too: the response is then signed and sealed for that read.
+
+A test vector for the ENSC-V2 string. The merchant signing seed is the bytes `00` to `1f` (`AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8`, public key `A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg`); the request is a `POST /v1/conversions` with no query, whose body is the 126 bytes `{"v":1,"encKeyId":"enc_01HZXVECTOR000000000000000","iv":"AAAAAAAAAAAAAAAA","ciphertext":"AAAA","tag":"AAAAAAAAAAAAAAAAAAAAAA"}`:
+
+```
+ENSC-V2
+POST
+/v1/conversions
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+766b4f825d129359eba52a066f27ac01a88b117f04897501822de85369da2aac
+1790000000
+bm9uY2UtdmVjdG9yLTAwMDAwMDAx
+mrc_01HZXVECTOR000000000000000
+idm_vector_0001
+YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8
+
+X-ENSC-Signature
+ed25519=0cZeWnpqBaZuyiXaxN3bAcp5Y_hbr3Jj1nbsbLASAFxJ0B_gq1cVWs4erfPUOQGYkuusGKdRnPUkOLwUnqrVCQ
+```
+
+The same request without the response nonce is the first nine lines with `ENSC-V1` in place of `ENSC-V2`.
+
+### The canonical query
+
+Both signed strings hash the query of the request in one canonical form. In JavaScript it is `new URLSearchParams(query)`, sorted, then `toString()`. Without it:
+
+1. Take the query string as sent, without the `?`, and split it on `&`. Skip empty pieces. In each piece the text before the first `=` is the name and the rest is the value; a piece without `=` has an empty value.
+2. Decode each name and each value as `application/x-www-form-urlencoded`: `+` is a space, `%XX` is one byte, and the bytes are read as UTF-8. A `%` that is not followed by two hex digits stays as it is.
+3. Sort the pairs by decoded name, then by decoded value, comparing UTF-16 code units (for ASCII text that is byte order).
+4. Write each pair as `name=value` and join the pairs with `&`. Encode each name and value as `application/x-www-form-urlencoded`: a space becomes `+`; the characters `A-Z a-z 0-9 * - . _` stay as they are; every other byte of the UTF-8 text becomes `%XX` in upper-case hex.
+
+No query gives the empty string. **A key that appears more than once** keeps every one of its values under ENSC-V2 and ENSC-RESP-V2: each pair is part of what is signed. Under ENSC-V1 the API reads only the first value of a repeated key, so sign an ENSC-V1 request over one value per key.
+
+| Query string as sent | Canonical query | SHA-256 of the canonical query |
+|---|---|---|
+| (none) | (empty string) | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| `status=succeeded&limit=2` | `limit=2&status=succeeded` | `4d7ef8f5ed84d000ea0f019c83126d42775a0c02cca4dbff6a5f1626a4e98551` |
+| `q=a%20b%3Ac&limit=2` (the value is `a b:c`) | `limit=2&q=a+b%3Ac` | `80905aac7dee9d5ffc921c53271169736e4ba4a748a6ee161b4d981a61f7db57` |
+| `q=a+b:c&limit=2` (the same value, spelled another way) | `limit=2&q=a+b%3Ac` | `80905aac7dee9d5ffc921c53271169736e4ba4a748a6ee161b4d981a61f7db57` |
+| `tag=b&tag=a&tag=b` | `tag=a&tag=b&tag=b` | `20129cea9195cf6223ff40601d1316c144d844e2fbdcbfa8254eacb3045e4747` |
+| `name=%C3%A9~&flag` | `flag=&name=%C3%A9%7E` | `1bcc76a18334a64104c9815e7eedca665a46d80ed600ab10585661fe73f94b78` |
+| `b=1&=x&a=%2f` | `=x&a=%2F&b=1` | `1e1a939bfa2eb3adb6170caffc6c5fb8a582f7c81dbc55dfd3bc8aa14b18d52a` |
 
 ## Idempotency
 
@@ -106,7 +155,7 @@ Only a final answer is remembered: a success, or a refusal that will not change 
 - **A request that is still running holds its key.** A second request with the same key while the first is in progress is refused with `409 ENSC_IDEMPOTENCY_CONFLICT`. If the first request never finished, its key is free again after 300 seconds, and the next request with that key runs.
 - **A secret that is shown once is repeated only to the credential that asked for it.** When the answer to a request carries such a secret (a newly issued credential), a retry with the same key and the same bearer credential receives the same answer. A retry with another credential is refused with `409 ENSC_IDEMPOTENCY_CONFLICT` and `details.reason` `secret_not_repeated`: the request did complete, and its secret is not shown again.
 
-When the SDK reports a failed write whose outcome is open (a network failure, a timeout, a 5xx, a redirect, or an answer that could not be verified), the error carries the key it sent in `details.idempotencyKey`: repeat the call with that key and it cannot execute twice. `details.responseStatus` is the 2xx status when ENSC did carry the request out but its answer could not be verified or opened, and `details.requestSent` is `false` when nothing was sent because ENSC's public keys could not be loaded first.
+When the SDK reports a failed write, whatever the status, the error carries the key it sent in `details.idempotencyKey`: repeat the call with that key and it cannot execute twice. That includes a refusal (4xx) since 0.6.0: an error response is not signed, so the SDK does not take one as proof that nothing was carried out. `details.responseStatus` is the 2xx status when ENSC did carry the request out but its answer could not be verified or opened, and `details.requestSent` is `false` when nothing was sent because ENSC's public keys could not be loaded first.
 
 ## Rate limits
 

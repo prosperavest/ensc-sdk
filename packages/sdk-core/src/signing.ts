@@ -7,10 +7,11 @@
  * sides move together and cannot drift out of compatibility.
  *
  * This module only adds the per-request ephemerals, a fresh timestamp and a
- * unique nonce, and produces the headers the transport attaches.
+ * unique nonce, and produces the headers the transport attaches. It also
+ * makes the response nonce every request carries, signed or not.
  */
 
-import { signRequest, toBase64Url } from '@ensc/protocol';
+import { RESPONSE_NONCE_BYTES, signRequest, toBase64Url } from '@ensc/protocol';
 import { randomBytes } from '@noble/hashes/utils.js';
 
 /** A unique, opaque, URL-safe nonce. New value for every signed request. */
@@ -25,6 +26,16 @@ export function generateNonce(): string {
  */
 export function generateIdempotencyKey(): string {
   return `idm_${toBase64Url(randomBytes(18))}`;
+}
+
+/**
+ * The value a request asks its answer to be bound to (`X-ENSC-Response-Nonce`):
+ * 32 fresh random bytes, base64url. New for every attempt of every request,
+ * reads included, and never reused: an answer is accepted only if it carries
+ * the value of the attempt it is read from.
+ */
+export function generateResponseNonce(): string {
+  return toBase64Url(randomBytes(RESPONSE_NONCE_BYTES));
 }
 
 export interface SignMutationInput {
@@ -42,6 +53,8 @@ export interface SignMutationInput {
   keyId: string;
   /** Idempotency key - included in the signature and sent as a header. */
   idempotencyKey: string;
+  /** Response nonce - included in the signature (ENSC-V2) and sent as a header. */
+  responseNonce: string;
 }
 
 /** Headers a signed request must carry. */
@@ -49,7 +62,8 @@ export type SignatureHeaders = Record<string, string>;
 
 /**
  * Sign a mutating request. Returns the `X-ENSC-*` headers (timestamp, nonce,
- * key id, signature, idempotency key) to merge into the outgoing request.
+ * key id, signature, idempotency key, response nonce) to merge into the
+ * outgoing request.
  */
 export function signMutation(input: SignMutationInput): SignatureHeaders {
   const timestamp = Math.floor(Date.now() / 1000);
@@ -64,6 +78,7 @@ export function signMutation(input: SignMutationInput): SignatureHeaders {
     nonce,
     merchantId: input.merchantId,
     idempotencyKey: input.idempotencyKey,
+    responseNonce: input.responseNonce,
     privateKey: input.privateKey,
     keyId: input.keyId,
   });

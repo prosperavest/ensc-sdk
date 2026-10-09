@@ -2,11 +2,14 @@
  * In-memory stand-in for a ProsperaVest API host, for SDK tests.
  *
  * It behaves like a real host on the wire: decrypts ENSC-ENC-V1 envelopes
- * with the merchant's encryption key (checking the AAD), verifies the ENSC-V1
- * signature over the envelope bytes, serves the product's public-key document,
- * and seals + signs every 2xx JSON response exactly as the API does. An SDK's
- * tests wrap it with their own client and then assert on what the SDK sent
- * and on what it returned to the caller.
+ * with the merchant's encryption key (checking the AAD), verifies the request
+ * signature over the envelope bytes (ENSC-V2 when the request carries a
+ * response nonce, ENSC-V1 when it does not), serves the product's public-key
+ * document, and seals + signs every 2xx JSON response exactly as the API
+ * does: ENSC-RESP-V2, bound to the request, when the request carries a
+ * response nonce, and ENSC-RESP-V1 when it does not. An SDK's tests wrap it
+ * with their own client and then assert on what the SDK sent and on what it
+ * returned to the caller.
  *
  * Test-only: this entry is never bundled into a published SDK.
  */
@@ -14,11 +17,15 @@
 import {
   base64UrlToBytes,
   buildRequestAad,
+  buildResponseCanonicalV2,
   bytesToBase64Url,
   decryptEnvelope,
   generateKeypair,
+  isResponseNonce,
   parseEnvelope,
+  type ResponseBinding,
   sealResponse,
+  sealResponseV2,
   sha256Hex,
   utf8ToBytes,
   verifyRequest,
@@ -97,6 +104,17 @@ export interface Reply {
   timestamp?: number;
   /** Override the key id header. */
   kid?: string;
+  /**
+   * Answer in ENSC-RESP-V1 although the request asked for ENSC-RESP-V2: what a
+   * host that predates V2 does, and what a downgrade looks like.
+   */
+  v1?: boolean;
+  /**
+   * Bind the ENSC-RESP-V2 answer to this instead of the request received: an
+   * answer made for another request (another nonce, method, path or query) or
+   * for another merchant or recipient key.
+   */
+  boundTo?: Partial<ResponseBinding>;
 }
 
 export type Handler = (call: RecordedCall) => Reply | Promise<Reply>;
@@ -179,16 +197,37 @@ export function fakeHost(
     let plaintext = wireBody;
     let signatureOk: boolean | undefined;
 
+    const query: Record<string, string> = {};
+    u.searchParams.forEach((v, k) => {
+      query[k] = v;
+    });
+    // What an ENSC-RESP-V2 answer is bound to: the request as received (every
+    // pair of its query string), the merchant and the recipient signing key.
+    const responseNonce = headers['x-ensc-response-nonce'];
+    const asked: ResponseBinding | undefined = isResponseNonce(responseNonce)
+      ? {
+          method,
+          path: u.pathname,
+          query: u.searchParams,
+          responseNonce,
+          merchantId: fx.merchantId,
+          recipientKeyId: fx.signingKeyId,
+        }
+      : undefined;
+
     if (MUTATING.has(method)) {
-      // Verify the ENSC-V1 signature over the exact wire bytes.
-      const query: Record<string, string> = {};
-      u.searchParams.forEach((v, k) => {
-        query[k] = v;
-      });
+      // Verify the request signature over the exact wire bytes: ENSC-V2 (every
+      // pair of the query string) when the request carries a response nonce,
+      // ENSC-V1 when it does not.
       const verify = verifyRequest({
         method,
         path: u.pathname,
-        query: Object.keys(query).length ? query : undefined,
+        query:
+          responseNonce !== undefined
+            ? u.searchParams
+            : Object.keys(query).length
+              ? query
+              : undefined,
         body: wireBody,
         timestamp: Number(headers['x-ensc-timestamp']),
         nonce: headers['x-ensc-nonce'] ?? '',
@@ -196,6 +235,7 @@ export function fakeHost(
         ...(headers['x-ensc-idempotency-key']
           ? { idempotencyKey: headers['x-ensc-idempotency-key'] }
           : {}),
+        ...(responseNonce !== undefined ? { responseNonce } : {}),
         publicKey: fx.signingPublicKey,
         signatureHeader: headers['x-ensc-signature'] ?? '',
       });
@@ -242,14 +282,21 @@ export function fakeHost(
     }
 
     const requestId = `req_${++requestCounter}`;
-    const sealed = sealResponse({
-      recipientEd25519PublicKey: reply.sealTo ?? fx.signingPublicKey,
-      requestId,
-      body: bodyText,
-    });
+    const recipient = reply.sealTo ?? fx.signingPublicKey;
+    const binding = asked && !reply.v1 ? { ...asked, ...reply.boundTo } : undefined;
+    const sealed = binding
+      ? sealResponseV2({
+          recipientEd25519PublicKey: recipient,
+          requestId,
+          binding,
+          body: bodyText,
+        })
+      : sealResponse({ recipientEd25519PublicKey: recipient, requestId, body: bodyText });
     const sealedText = JSON.stringify(sealed);
     const timestamp = String(reply.timestamp ?? Math.floor(Date.now() / 1000));
-    const canonical = `ENSC-RESP-V1\n${requestId}\n${timestamp}\n${sha256Hex(sealedText)}`;
+    const canonical = binding
+      ? buildResponseCanonicalV2({ requestId, timestamp, binding, body: sealedText })
+      : `ENSC-RESP-V1\n${requestId}\n${timestamp}\n${sha256Hex(sealedText)}`;
     const sig = ed25519.sign(utf8ToBytes(canonical), reply.signWith ?? SERVER_SIGNING_SEED);
     return new Response(sealedText, {
       status,

@@ -9,8 +9,12 @@
 export {
   buildCanonicalString,
   CANONICAL_VERSION,
+  CANONICAL_VERSION_V2,
   type CanonicalRequest,
   canonicalQuery,
+  isResponseNonce,
+  RESPONSE_NONCE_BYTES,
+  RESPONSE_NONCE_HEADER,
   sha256Hex,
 } from './canonical.js';
 export * from './encoding.js';
@@ -24,6 +28,7 @@ export {
   publicKeyFromPrivate,
   toBase64Url,
 } from './keypair.js';
+export * from './response.js';
 export { type SignedRequest, type SigningInput, signRequest } from './sign.js';
 export { type VerifyError, type VerifyInput, type VerifyResult, verifyRequest } from './verify.js';
 export * from './version.js';

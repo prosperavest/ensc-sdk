@@ -1,6 +1,6 @@
 /**
  * Payload protection: request encryption (ENSC-ENC-V1) and sealed-response
- * verification + opening (ENSC-RESP-V1). Shared by every SDK; the product
+ * verification + opening (ENSC-RESP-V2). Shared by every SDK; the product
  * decides only which well-known document the signing keys come from.
  *
  * No SDK implements any cryptography of its own. The primitives live
@@ -13,23 +13,32 @@
  *
  *   request:   plaintext JSON  -> encrypt (AAD binds method, path, merchant,
  *              key id) -> envelope JSON -> sign envelope bytes -> send
- *   response:  verify ENSC's Ed25519 signature over the sealed body -> check
- *              the timestamp window -> open with the merchant signing key ->
- *              plaintext JSON
+ *   response:  check the timestamp window -> verify ENSC's Ed25519 signature
+ *              over the sealed body and the request that was sent -> open
+ *              with the merchant signing key, under an info that names the
+ *              same request -> plaintext JSON
  *
- * A response is never trusted before its signature verifies, and the decrypted
- * plaintext is bound to the request id the response carries through the HPKE
- * info.
+ * A response is never trusted before its signature verifies. Every request
+ * carries a fresh response nonce and so asks for ENSC-RESP-V2; the signed
+ * string and the HPKE info are rebuilt here from the request that was sent
+ * (method, path, query and that nonce) and from the client's own merchant id
+ * and signing key id, never from what the response says. A response made for
+ * another request, or for another merchant that repeated this one, therefore
+ * neither verifies nor opens, and an ENSC-RESP-V1 response, which names
+ * neither, is refused: there is no setting that accepts one.
  */
 
 import {
   base64UrlToBytes,
   buildRequestAad,
+  buildResponseCanonicalV2,
   EnscError,
   encryptEnvelope,
   HpkeError,
-  openResponse,
-  parseSealedEnvelope,
+  openResponseV2,
+  parseSealedEnvelopeV2,
+  type RequestBinding,
+  type ResponseBinding,
   sha256Hex,
   utf8ToBytes,
 } from '@ensc/protocol';
@@ -37,6 +46,11 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import type { ResolvedClientConfig } from './config.js';
 import type { SdkProduct } from './product.js';
 
+/**
+ * The label of the first sealed-response version. No response in it is
+ * accepted any more; the string is rebuilt only to tell a response the host
+ * signed in that version from one it did not sign at all.
+ */
 export const RESPONSE_SIGNATURE_VERSION = 'ENSC-RESP-V1' as const;
 
 /**
@@ -88,7 +102,7 @@ export async function encryptRequestBody(
   return JSON.stringify(envelope);
 }
 
-/** The exact string the host signs for a sealed response. */
+/** The exact string the host signs for an ENSC-RESP-V1 response. */
 export function buildResponseCanonical(requestId: string, timestamp: string, body: string): string {
   return `${RESPONSE_SIGNATURE_VERSION}\n${requestId}\n${timestamp}\n${sha256Hex(body)}`;
 }
@@ -246,12 +260,21 @@ export interface OpenSealedInput {
   /** Raw response body text. */
   body: string;
   headers: Headers;
+  /**
+   * The request this response must answer, as it was sent: its method, path
+   * and query, and the response nonce of the attempt the response was read
+   * from. Who the response must be for is the client's own configuration.
+   */
+  request: RequestBinding;
 }
 
 /**
- * Verify a sealed response and return its plaintext. Throws
- * `ENSC_INVALID_SIGNATURE` when the signature, key id or timestamp is
- * unacceptable and `ENSC_DECRYPTION_FAILED` when the envelope cannot be opened.
+ * Verify a sealed response against the request it must answer, and against
+ * the merchant and signing key of this client, and return its plaintext.
+ * Throws `ENSC_INVALID_SIGNATURE` when the signature, key id or timestamp is
+ * unacceptable, or when the response is not bound to the request
+ * (`details.reason` is `response_not_bound` for a genuine ENSC-RESP-V1
+ * response), and `ENSC_DECRYPTION_FAILED` when the envelope cannot be opened.
  */
 export async function openSealedResponse(
   cfg: ResolvedClientConfig,
@@ -266,7 +289,7 @@ export async function openSealedResponse(
   if (!signature || !kid || !timestamp || !requestId) {
     throw new EnscError(
       'ENSC_INVALID_SIGNATURE',
-      'Response is not a signed ENSC-RESP-V1 envelope (missing X-ENSC-* headers). ' +
+      'Response is not a signed ENSC-RESP-V2 envelope (missing X-ENSC-* headers). ' +
         'This SDK requires API version 2026-09-15 or later.',
     );
   }
@@ -287,18 +310,47 @@ export async function openSealedResponse(
     throw new EnscError('ENSC_INVALID_SIGNATURE', 'Response signature is malformed');
   }
 
+  const signatureText = match[1];
+
   const publicKey = await keys.resolve(kid);
-  let verified = false;
+  const signedBy = (canonical: string): boolean => {
+    try {
+      return ed25519.verify(base64UrlToBytes(signatureText), utf8ToBytes(canonical), publicKey);
+    } catch {
+      return false;
+    }
+  };
+  // The request, and who it must have been answered to: this client's own
+  // merchant and the signing key it names on every request. An answer served
+  // to another merchant for the same request carries other lines here.
+  const binding: ResponseBinding = {
+    ...input.request,
+    merchantId: cfg.merchantId,
+    recipientKeyId: cfg.signingKeyId,
+  };
+  let bound: string;
   try {
-    verified = ed25519.verify(
-      base64UrlToBytes(match[1]),
-      utf8ToBytes(buildResponseCanonical(requestId, timestamp, input.body)),
-      publicKey,
-    );
+    bound = buildResponseCanonicalV2({ requestId, timestamp, binding, body: input.body });
   } catch {
-    verified = false;
+    throw new EnscError(
+      'ENSC_VALIDATION_FAILED',
+      'config.merchantId and config.signingKeyId must each be one line of text',
+    );
   }
-  if (!verified) {
+  if (!signedBy(bound)) {
+    // Neither case is accepted; they are told apart only to say why. A
+    // response the host did sign, in the version that names no request, means
+    // the host does not serve ENSC-RESP-V2 or never saw the header that asks
+    // for it. It is not evidence about this request, so it is refused.
+    if (signedBy(buildResponseCanonical(requestId, timestamp, input.body))) {
+      throw new EnscError(
+        'ENSC_INVALID_SIGNATURE',
+        'Response is ENSC-RESP-V1: signed by the host but not bound to the request that was sent. ' +
+          'This SDK asks for ENSC-RESP-V2 and accepts nothing else: the host does not serve it, ' +
+          'or the request header that asks for it did not reach the host.',
+        { reason: 'response_not_bound' },
+      );
+    }
     throw new EnscError('ENSC_INVALID_SIGNATURE', 'Response signature did not verify');
   }
 
@@ -308,15 +360,16 @@ export async function openSealedResponse(
   } catch {
     parsed = undefined;
   }
-  const envelope = parseSealedEnvelope(parsed);
+  const envelope = parseSealedEnvelopeV2(parsed);
   if (!envelope) {
     throw new EnscError('ENSC_DECRYPTION_FAILED', 'Response body is not a sealed envelope');
   }
 
   try {
-    return openResponse({
+    return openResponseV2({
       recipientEd25519PrivateKey: cfg.signingPrivateKey,
       requestId,
+      binding,
       envelope,
     });
   } catch (err) {

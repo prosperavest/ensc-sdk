@@ -2,7 +2,7 @@
   "name": "@ensc/protocol",
   "private": true,
   "version": "0.1.0",
-  "description": "ENSC wire protocol for clients and services: request canonicalisation and Ed25519 signing, request encryption (ENSC-ENC-V1), sealed responses (ENSC-RESP-V1), error envelope",
+  "description": "ENSC wire protocol for clients and services: request canonicalisation and Ed25519 signing, request encryption (ENSC-ENC-V1), sealed responses (ENSC-RESP-V1, ENSC-RESP-V2), error envelope",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.cjs",

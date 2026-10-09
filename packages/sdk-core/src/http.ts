@@ -8,16 +8,20 @@
  *     envelope bytes that go on the wire (encrypt-then-sign)
  *   - Auto-generate a stable idempotency key per logical request, reused across
  *     retries so a transparently retried POST cannot double-execute
- *   - Verify the host's signature on every successful response, then open the
- *     sealed ENSC-RESP-V1 body with the merchant signing key
+ *   - Send a fresh response nonce with every attempt of every request, reads
+ *     included, so the host answers in ENSC-RESP-V2
+ *   - Verify the host's signature on every successful response against the
+ *     request that was sent, then open the sealed ENSC-RESP-V2 body with the
+ *     merchant signing key: a response made for another request is refused
  *   - Have the host's public keys in hand before a write is sent, so that a
  *     write that succeeded is never reported as failed for want of a key
  *   - Retry transient failures (network errors + 5xx) with backoff; never 4xx,
  *     and never a request the host answered with success
  *   - Never follow a redirect: the signed request goes to the configured host
  *   - Map every failure to a single `EnscError` type; a failed write carries
- *     its idempotency key (`details.idempotencyKey`) and the request id, so
- *     the caller can repeat it safely with the same key or look it up
+ *     its idempotency key (`details.idempotencyKey`) and the request id on
+ *     every status, a refusal (4xx) included, so the caller can repeat it
+ *     safely with the same key or look it up
  *   - Hand the `Deprecation` and `Sunset` headers of an answer to the
  *     integrator's `onDeprecation` callback, so a version scheduled for
  *     retirement is noticed before it stops being served
@@ -25,11 +29,11 @@
  * Resource modules sit on top of this and never deal with fetch directly.
  */
 
-import { EnscError, isEnscErrorResponse } from '@ensc/protocol';
+import { EnscError, isEnscErrorResponse, RESPONSE_NONCE_HEADER } from '@ensc/protocol';
 import type { DeprecationNotice, ResolvedClientConfig } from './config.js';
 import { encryptRequestBody, openSealedResponse, PublicKeyResolver } from './crypto.js';
 import type { SdkProduct } from './product.js';
-import { generateIdempotencyKey, signMutation } from './signing.js';
+import { generateIdempotencyKey, generateResponseNonce, signMutation } from './signing.js';
 
 /** Query value types accepted by resource methods. `undefined` entries are dropped. */
 export type QueryValue = string | number | boolean | undefined;
@@ -194,7 +198,16 @@ export class HttpClient {
       // Re-sign on every attempt: timestamp and nonce must be fresh (an old
       // nonce is already burned, an old timestamp may be outside the skew
       // window). The idempotency key stays constant so the server still dedupes.
-      const headers: Record<string, string> = { ...baseHeaders };
+      //
+      // The response nonce is new on every attempt too, and goes out on reads
+      // as well as writes: the answer to this attempt must carry this value,
+      // so an answer made for any other request, an earlier attempt of this
+      // one included, is refused. On a write it is also signed (ENSC-V2).
+      const responseNonce = generateResponseNonce();
+      const headers: Record<string, string> = {
+        ...baseHeaders,
+        [RESPONSE_NONCE_HEADER]: responseNonce,
+      };
       if (isMutation && idempotencyKey) {
         Object.assign(
           headers,
@@ -207,6 +220,7 @@ export class HttpClient {
             privateKey: cfg.signingPrivateKey,
             keyId: cfg.signingKeyId,
             idempotencyKey,
+            responseNonce,
           }),
         );
       }
@@ -272,9 +286,10 @@ export class HttpClient {
 
       if (response.ok) {
         // Every successful body is sealed to our signing key and signed by
-        // the host. Nothing is parsed before the signature verifies, and no route
-        // this client calls answers an empty 2xx, so an empty body is refused
-        // like any other unsigned answer.
+        // the host, over the request this attempt sent. Nothing is parsed
+        // before the signature verifies, and no route this client calls
+        // answers an empty 2xx, so an empty body is refused like any other
+        // unsigned answer.
         //
         // The host answered with success: the request was carried out. An
         // answer that cannot be verified or opened is never a reason to send
@@ -292,6 +307,7 @@ export class HttpClient {
           const plaintext = await openSealedResponse(cfg, this.#keys, {
             body: raw,
             headers: response.headers,
+            request: { method: opts.method, path: opts.path, query, responseNonce },
           });
           return parseJson(plaintext, opts.path) as T;
         } catch (err) {
@@ -319,11 +335,11 @@ export class HttpClient {
         await sleep(retryDelayMs(attempt));
         continue;
       }
-      // A 4xx is the host's refusal: nothing was carried out and the error is
-      // the host's own. Anything else leaves the outcome open.
-      throw response.status >= 400 && response.status < 500
-        ? enscError
-        : forCaller(enscError, requestId);
+      // Whatever the status, a failed write names its idempotency key. An
+      // error answer is not signed: a 4xx normally is the host's refusal, but
+      // nothing proves that this one came from the host, so the caller is
+      // always handed the key that makes a repeat safe.
+      throw forCaller(enscError, requestId);
     }
 
     // Unreachable in practice (the loop either returns or throws) but satisfies

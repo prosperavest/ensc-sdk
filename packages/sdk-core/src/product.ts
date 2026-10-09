@@ -2,7 +2,7 @@
  * What distinguishes one ProsperaVest SDK from another.
  *
  * The wire protocol is the same for every product: Bearer API key, pinned
- * date version, ENSC-ENC-V1 encrypted and ENSC-V1 signed writes, ENSC-RESP-V1
+ * date version, ENSC-ENC-V1 encrypted and ENSC-V2 signed writes, ENSC-RESP-V2
  * sealed responses, ENSC-WH-V1 signed webhooks, one error envelope. What
  * differs is which host answers, which key prefix the host issues, where its
  * public keys are served and how the SDK names itself in messages. An SDK is

@@ -1,5 +1,5 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { buildCanonicalString, type CanonicalRequest } from './canonical.js';
+import { buildCanonicalString, type CanonicalRequest, RESPONSE_NONCE_HEADER } from './canonical.js';
 import { ENCODER, fromBase64Url, toBase64Url } from './keypair.js';
 
 export interface SigningInput extends CanonicalRequest {
@@ -15,6 +15,7 @@ export interface SignedRequest {
     'X-ENSC-Key-Id': string;
     'X-ENSC-Signature': string;
     'X-ENSC-Idempotency-Key'?: string;
+    'X-ENSC-Response-Nonce'?: string;
   };
   /** The canonical string that was signed (for debugging) */
   canonical: string;
@@ -25,6 +26,9 @@ export interface SignedRequest {
  *
  * The signature is `ed25519={base64url(sig)}`. The prefix lets us add new signature
  * schemes (e.g. `dilithium=` for PQC) without ambiguity in the future.
+ *
+ * With a `responseNonce` the request is signed as ENSC-V2 and the value is
+ * returned as its header, so what is sent is what was signed.
  */
 export function signRequest(input: SigningInput): SignedRequest {
   const canonical = buildCanonicalString(input);
@@ -41,6 +45,7 @@ export function signRequest(input: SigningInput): SignedRequest {
     'X-ENSC-Signature': `ed25519=${sigB64}`,
   };
   if (input.idempotencyKey) headers['X-ENSC-Idempotency-Key'] = input.idempotencyKey;
+  if (input.responseNonce !== undefined) headers[RESPONSE_NONCE_HEADER] = input.responseNonce;
 
   return { headers, canonical };
 }

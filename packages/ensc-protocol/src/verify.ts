@@ -1,5 +1,5 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
-import { buildCanonicalString, type CanonicalRequest } from './canonical.js';
+import { buildCanonicalString, type CanonicalRequest, isResponseNonce } from './canonical.js';
 import { ENCODER, fromBase64Url } from './keypair.js';
 
 export type VerifyError =
@@ -54,7 +54,11 @@ export function verifyRequest(input: VerifyInput): VerifyResult {
   }
   if (pk.length !== 32) return { ok: false, error: 'BAD_PUBLIC_KEY' };
 
-  // 4. Reconstruct canonical and verify
+  // 4. Reconstruct canonical and verify. A response nonce that does not have
+  // the form of one was never signed by a client of this protocol.
+  if (input.responseNonce !== undefined && !isResponseNonce(input.responseNonce)) {
+    return { ok: false, error: 'BAD_SIGNATURE_FORMAT' };
+  }
   const canonical = buildCanonicalString(input);
   let valid: boolean;
   try {

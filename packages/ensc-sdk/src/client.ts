@@ -20,9 +20,10 @@
  *   // sign conversion.voucher.approvalTransaction (if any), then conversion.voucher.transaction
  *   await ensc.conversions.events.confirmed(conversion.reference, txHash);
  *
- * Every write is encrypted (ENSC-ENC-V1) and signed (ENSC-V1); every successful
- * response is verified against ENSC's published key and opened (ENSC-RESP-V1)
- * before it is returned. None of that is visible to callers. The transport
+ * Every write is encrypted (ENSC-ENC-V1) and signed (ENSC-V2); every successful
+ * response is verified against ENSC's published key and against the request
+ * that was sent, then opened (ENSC-RESP-V2), before it is returned. None of
+ * that is visible to callers. The transport
  * itself is `@ensc/sdk-core`, shared with the other ProsperaVest SDKs; this
  * class is the ENSC product's surface on it.
  */

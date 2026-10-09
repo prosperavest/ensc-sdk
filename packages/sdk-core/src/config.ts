@@ -85,8 +85,8 @@ export interface ClientConfigBase {
 
   /**
    * Ed25519 signing private key (secret): base64url-encoded 32-byte seed
-   * issued by the dashboard. Signs every mutating request (ENSC-V1) and is
-   * the key every sealed response (ENSC-RESP-V1) is opened with.
+   * issued by the dashboard. Signs every mutating request (ENSC-V2) and is
+   * the key every sealed response (ENSC-RESP-V2) is opened with.
    */
   signingPrivateKey: string;
 

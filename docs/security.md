@@ -29,17 +29,19 @@ The encryption is bound to the HTTP method, the path, your merchant id and the k
 
 ## Layer 2: signed requests
 
-Every write also carries an Ed25519 signature over the method, path, query, a hash of the (encrypted) body, a timestamp, a single-use nonce, your merchant id and your idempotency key. ENSC verifies it against your registered public key, rejects timestamps more than five minutes off, and rejects any nonce it has seen before. A request cannot be altered in transit or replayed.
+Every write also carries an Ed25519 signature over the method, path, query, a hash of the (encrypted) body, a timestamp, a single-use nonce, your merchant id, your idempotency key and the value the response must carry (see Layer 3). ENSC verifies it against your registered public key, rejects timestamps more than five minutes off, and rejects any nonce it has seen before. A request cannot be altered in transit or replayed.
 
 ## Layer 3: sealed and signed responses
 
 Every successful response is encrypted to your signing key using HPKE (RFC 9180: X25519, HKDF-SHA256, ChaCha20-Poly1305) and signed by ENSC:
 
 ```json
-{ "v": 1, "enc": "…", "ciphertext": "…" }
+{ "v": 2, "enc": "…", "ciphertext": "…" }
 ```
 
 with headers `X-ENSC-Signature`, `X-ENSC-Key-Id`, `X-ENSC-Timestamp`, `X-ENSC-Request-Id`. The SDK checks ENSC's signature against the public keys published at `GET /v1/.well-known/ensc-public-keys.json` and the age of the response (300 seconds either side of your clock) before it opens anything, so a response ENSC did not sign is never parsed. Only your signing private key can open the body: someone holding just your API key learns nothing from the responses.
+
+A response is also checked against the request it answers. The SDK (0.6.0 and later) sends a fresh random value with every request, reads included, and ENSC signs and seals the response for that value, for the method, path and query of the request, and for your merchant id and signing key id. A response made for another request or for another account, or a genuine one played back later, does not verify and is refused. Earlier SDK versions do not send the value and receive the earlier response form (`"v": 1`), which is signed and sealed but not tied to a request; they keep working, and upgrading adds the check.
 
 Error responses are not sealed, so a 4xx or 5xx is always readable.
 

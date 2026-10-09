@@ -20,7 +20,9 @@
  *
  *   { "v": 1, "enc": "<base64url, 32 bytes>", "ciphertext": "<base64url>" }
  *
- * info = "ENSC-RESP-V1\n{requestId}" binds the ciphertext to one request.
+ * info = "ENSC-RESP-V1\n{requestId}" binds the ciphertext to one request id,
+ * which the host chooses. ENSC-RESP-V2 (response.ts) seals with the same suite
+ * under an info that also names the request the client sent.
  */
 
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';

@@ -290,7 +290,8 @@ export async function executeVoucher(
   }
   const transaction = await signAndBroadcast(voucher.transaction, signer, options);
   if (transaction.status === 'reverted') {
-    // Do not report this hash as confirmed; report the conversion failed.
+    // Do not report this hash as confirmed. The voucher was not used: ask for
+    // a new one, or report the conversion failed once this one has expired.
     throw new EnscError('ENSC_UPSTREAM_FAILED', 'The converter call reverted', {
       txHash: transaction.txHash,
     });

@@ -35,7 +35,9 @@ export const DEFAULT_BASE_URL = 'https://api.ensc.prosperavest.com';
  * Bump this deliberately, with a changelog entry, when adopting a newer contract.
  *
  * 2026-09-15 introduced mandatory request encryption (ENSC-ENC-V1) and sealed,
- * signed responses (ENSC-RESP-V1).
+ * signed responses (ENSC-RESP-V1). Responses bound to the request
+ * (ENSC-RESP-V2, which this SDK asks for on every call) are an addition
+ * within the same date version.
  */
 export const DEFAULT_API_VERSION: string = CURRENT_API_VERSION;
 
