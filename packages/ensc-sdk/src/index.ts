@@ -75,8 +75,12 @@ export type {
   QuoteResponse,
   ReportEventParams,
   ScreeningCounterparty,
+  ScreeningStatus,
   ScreeningStatusResponse,
+  TravelRuleHoldReason,
+  WalletProof,
 } from './resources/conversions.js';
+export { walletProofMessage } from './resources/conversions.js';
 export type {
   EventDelivery,
   EventDetail,

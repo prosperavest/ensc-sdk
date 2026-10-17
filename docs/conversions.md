@@ -45,6 +45,8 @@ const settled = await ensc.conversions.events.confirmed(c.reference, transaction
 
 `executeVoucher` and `signAndBroadcast` are conveniences; any EVM signer works with the calldata. Their second argument, `signer`, is a raw wallet private key or any viem account. It is a separate secret from the ENSC credentials, never touches the ENSC API and is never stored by the SDK; pass it per call and never put it in `EnscClient` config. Whatever you use, the wallet key never goes to ENSC.
 
+If the send itself gets no answer, the helper does not send it again: a signer that signs in your process (a raw key or a local viem account) has the transaction's hash from the signed bytes before anything is sent, so the `ENSC_UPSTREAM_FAILED` error carries it in `details.txHash`. Follow that hash and report it with `events.submitted`; sending again would make a second transaction. The error has no `details.txHash` when the node refused the transaction and no node shows it: nothing was sent. A JSON-RPC account's wallet sends the transaction itself and answers its own hash.
+
 ### Signing the calldata
 
 With your own signer, for each of `approvalTransaction` (when present) and `transaction`:
@@ -108,7 +110,7 @@ Amounts ENSC returns are base-unit integer strings (`amountIn`, `amountOut`, `ba
 - `crypto-issue`, `crypto-redeem`: `pair` (`USDC`, `USDT`, `CELO`). The pair must be listed on the converter of the chain you name.
 - `fiat-issue`: `payer` with `email` (required) and optional `name` and `phone`; the payment rail needs a contact for the collection.
 - `fiat-redeem`: `payout` with `bankCode`, `accountNumber` (10 digits) and `accountName`. Resolve the account first with `POST /v1/accounts/resolve` (`ensc.accounts.resolve({ bankCode, accountNumber })`) and pass back the name it returns; the create refuses a name that does not match the bank record (`ENSC_ACCOUNT_RESOLUTION_FAILED`). Bank codes come from `GET /v1/banks` (`ensc.banks.list()`).
-- Any type: `counterparty` (`type` `individual` or `company`, `name`, `wallet`) for transaction screening, and `metadata` (up to 16 string keys, key up to 40 and value up to 200 characters) echoed back on the conversion object (webhook payloads carry the summary only).
+- Any type: `counterparty` (`type` `individual` or `company`, `name`, `wallet`, `walletProof`; see [Your customer and its wallet](#your-customer-and-its-wallet)) for transaction screening, and `metadata` (up to 16 string keys, key up to 40 and value up to 200 characters) echoed back on the conversion object (webhook payloads carry the summary only).
 
 ## Paying in Naira (`fiat-issue`)
 
@@ -145,13 +147,40 @@ The voucher for a `fiat-redeem` commits to the payout account you gave: the conv
 
 The conversion's `payout` object shows `bankCode`, `accountLast4`, `status` (`pending`, `initiated`, `in_progress`, `successful`, `failed`, `requires_manual_review`) and `providerTransferId`. A transient failure at the rail is retried with backoff for up to five attempts; a payout that still fails, or a definitive refusal, parks the conversion in `requires_manual_review` and sends `payout.failed`. Your ENSC has already been burned at that point, so a person at ENSC resolves the case; contact support with the reference. `POST /v1/conversions/{reference}/payout` (`ensc.conversions.payout(reference)`) nudges a payout that is `payout_pending` ahead of the next scheduled retry; it does nothing once a payout is in progress.
 
+### Your customer and its wallet
+
+`counterparty` describes your customer, the other party of the conversion: `type` (`individual` or `company`), `name`, and on a crypto leg `wallet`, your customer's own wallet (never the wallet that signs the converter call). When you leave `name` out, the payer's `name` of a `fiat-issue` is used. On a `fiat-redeem` the other party is the holder of the account paid, named as the bank resolved the account, whatever `counterparty.name` says.
+
+`counterparty.walletProof` proves that your customer controls `counterparty.wallet` on the chain of the request. It takes one of two forms:
+
+| Form | What ENSC checks |
+|---|---|
+| `{ "type": "transfer", "txHash": "0x..." }` | For a `crypto-issue`: your customer's pay-in itself, mined on that chain and successful, carrying a transfer of the conversion's own token (the pair paid in) of exactly the conversion's amount from the wallet. For a `crypto-redeem`: the hash of the earlier pay-in that proved the wallet for your account (a wallet that no pay-in proved is proven with a signature instead). One transaction proves one wallet for one account only. |
+| `{ "type": "signature", "signature": "0x..." }` | An EIP-191 `personal_sign` by the wallet over the text below. A contract wallet is checked with ERC-1271. |
+
+The text to sign, with your merchant id, the wallet written EIP-55 checksummed, and the chain id (`walletProofMessage({ merchantId, wallet, chainId })` in the SDK returns it):
+
+```text
+ENSC wallet ownership
+Merchant: mrc_01J00000000000000000000000
+Wallet: 0x1111111111111111111111111111111111111111
+Chain ID: 42220
+I confirm that I control this wallet.
+```
+
+A proven wallet is remembered for your account on that chain: later conversions to or from it need no proof. A malformed `walletProof`, or one that does not prove the wallet, is `400 ENSC_VALIDATION_FAILED` naming `counterparty.walletProof` in `details.fields`. When the chain cannot be read to check it, the answer is `502 ENSC_CHAIN_UNAVAILABLE`: send it again.
+
 ## Transaction screening holds
 
 Conversions may be screened before a voucher is issued. Most are approved immediately. When one needs review the create answers `202` with `status: "screening_hold"` and `screening.status` of `IN_REVIEW` or `AWAITING_USER`; you receive `conversion.screening_hold`. Poll `GET /v1/conversions/screening?reference=…` (`ensc.conversions.screening(reference)`) or `get`, or wait for the webhook: an approval moves the conversion on automatically (`conversion.voucher_issued`, or `conversion.awaiting_payment` for a `fiat-issue`), and a decline fails it (`conversion.failed`). Asking for the voucher while the hold stands returns `409 ENSC_KYT_HOLD` with `retryAfterSeconds`. A conversion declined at create time is stored as `failed` and the create answers `403 ENSC_KYT_DECLINED` with the reference in `details`.
 
+Where the compliance check of crypto transfers is enforced, a crypto leg can also be held with `screening.status` `travel_rule_pending` or `wallet_ownership_unproven` (create answers `202`, `status: "screening_hold"`, and you receive `conversion.screening_hold`). Neither is an approval or a decline. A crypto leg that names no `counterparty.wallet` moves crypto between your own wallets and is not held for this check, nor is a transfer the check does not run for. A held conversion that compliance staff approve on review moves on. A `wallet_ownership_unproven` hold is lifted by posting the same reference again with `counterparty.walletProof`; a `travel_rule_pending` hold is lifted when the check completes. Asking for the voucher looks at the hold again and moves the conversion on once nothing holds it; while it stands the answer is `409 ENSC_KYT_HOLD`.
+
 ## Vouchers that expire
 
 A voucher not used before `expiresAt` is simply dead; the transaction would revert. Ask for a new one with `POST /v1/conversions/{reference}/voucher` (`ensc.conversions.voucher(reference)`). Crypto legs are re-quoted at the current rate (so `amountOut` may change); fiat legs keep their amounts. A conversion whose voucher expired stays `voucher_issued` until you ask for a new voucher or report it failed; ENSC does not close it by itself.
+
+A voucher asked for again while an earlier one can still be executed keeps the conversion's amounts, crypto legs included, so whichever of the two your wallet executes, the conversion settles. A crypto leg is quoted afresh only once every earlier voucher has expired unused. Of two voucher requests for the same conversion at the same moment, one is answered with the voucher; the other answers `409 ENSC_INVALID_STATE` with `details.reason` `changed_meanwhile` and hands out nothing: read the conversion and use the voucher it shows.
 
 When a transaction is on record for the conversion, the voucher request first checks it. If that transaction is dead (it reverted, or the network never saw it and its voucher expired more than two minutes ago) the conversion is released and a new voucher is issued. If it may still settle, or a receipt has been verified, no voucher is issued (`409 ENSC_INVALID_STATE`): report the transaction `confirmed` instead. No voucher is issued for a conversion in `requires_manual_review` either (`409 ENSC_INVALID_STATE`).
 
@@ -182,7 +211,7 @@ A conversion moves forward, with one exception: a conversion at `onchain_submitt
 | `tokenIn`, `tokenOut` | Symbols, `NGN` for the fiat side |
 | `amountIn`, `amountOut` | Base units as decimal strings (18 decimals for ENSC and NGN legs, the token's decimals for pair tokens); `amountInFormatted`, `amountOutFormatted` for display |
 | `fiatAmountNgn` | The NGN principal of a fiat leg, 2 decimals, or `null` |
-| `screening.status` | `APPROVED`, `IN_REVIEW`, `DECLINED`, `AWAITING_USER` or `SKIPPED` |
+| `screening.status` | `APPROVED`, `IN_REVIEW`, `DECLINED`, `AWAITING_USER`, `SKIPPED`, `travel_rule_pending` or `wallet_ownership_unproven` |
 | `voucher` | `voucher` (the signed fields), `signature`, `domain`, `expiresAt`, `approvalToken`, `approvalTransaction`, `transaction`; `null` until issued |
 | `paymentInstructions` | `fiat-issue` only, see above |
 | `payout` | `fiat-redeem` only, see above; never the full account number |
@@ -232,13 +261,13 @@ Beyond the authentication and validation codes in [Authorization](./authorizatio
 | `ENSC_RESERVE_UNAVAILABLE`, `ENSC_QUOTE_FAILED`, `ENSC_CHAIN_UNAVAILABLE` | 503, 502, 502 | The chain could not be read; nothing changed, retry |
 | `ENSC_VOUCHER_UNAVAILABLE` | 503 | The voucher could not be issued; retry |
 | `ENSC_VOUCHER_REFUSED` | 422 | The voucher was refused (`details.reason`); contact support if it persists |
-| `ENSC_KYT_HOLD` | 409 | On a screening hold; `retryAfterSeconds` in `details` |
+| `ENSC_KYT_HOLD` | 409 | On a screening hold (including `travel_rule_pending` and `wallet_ownership_unproven`); `retryAfterSeconds` in `details` |
 | `ENSC_KYT_DECLINED` | 403 | Declined by transaction screening; the conversion is `failed` |
 | `ENSC_SCREENING_UNAVAILABLE` | 503 | Screening could not be performed; retry |
 | `ENSC_ACCOUNT_RESOLUTION_FAILED` | 422 | The account could not be resolved, or `accountName` does not match the bank record |
 | `ENSC_PAYOUT_DETAILS_REQUIRED` | 400 | `fiat-redeem` without usable payout details |
 | `ENSC_PAYMENT_NOT_CONFIRMED` | 409 | Voucher requested for a `fiat-issue` whose transfer has not been confirmed |
-| `ENSC_INVALID_STATE` | 409 | The action does not fit the conversion's status (for example a voucher while a reported transaction may still settle, a different transaction after a receipt was verified, or `failed` reported after a transaction was recorded). For a refused `failed` report `details.reason` says what to do: `voucher_live` (the voucher can still be executed; wait `details.retryAfterSeconds` and report again), `voucher_used` (the voucher was executed; report the transaction `confirmed`), `changed_meanwhile` (the conversion changed at that moment; read it and report again), `payment_received` (a `fiat-issue` whose payment was received; ask for a new voucher). A voucher request for a conversion whose voucher was executed is refused with `voucher_used` too |
+| `ENSC_INVALID_STATE` | 409 | The action does not fit the conversion's status (for example a voucher while a reported transaction may still settle, a different transaction after a receipt was verified, or `failed` reported after a transaction was recorded). For a refused `failed` report `details.reason` says what to do: `voucher_live` (the voucher can still be executed; wait `details.retryAfterSeconds` and report again), `voucher_used` (the voucher was executed; report the transaction `confirmed`), `changed_meanwhile` (the conversion changed at that moment; read it and report again), `payment_received` (a `fiat-issue` whose payment was received; ask for a new voucher). A voucher request for a conversion whose voucher was executed is refused with `voucher_used` too, and one that met another voucher request for the same conversion at the same moment with `changed_meanwhile` (read the conversion and use the voucher it shows) |
 | `ENSC_TX_ALREADY_USED` | 409 | That transaction's receipt was already verified for another conversion |
 | `ENSC_SETTLEMENT_VERIFICATION_FAILED` | 409 | The receipt does not prove this conversion. When `details.retriable` is `true` the transaction is not mined yet or not yet deep enough (`details.reason` `not_enough_confirmations`); report again shortly. When `details.voucherReissuable` is `true` the reported transaction is dead; ask for a new voucher. |
 | `ENSC_PAYOUT_REF_MISMATCH` | 409 | The payout account recorded on chain differs from the one stored; no payout is made |

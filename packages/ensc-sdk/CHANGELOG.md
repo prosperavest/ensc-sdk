@@ -3,6 +3,50 @@
 All notable changes to `@ensc/sdk`. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+No version bump and no publish in this delivery. Additive: no field is
+renamed or removed.
+
+### Changed
+
+- `signAndBroadcast` (and so `executeVoucher`) signs a local account's
+  transaction in your process (a raw key, `privateKeyToAccount`,
+  `mnemonicToAccount`, `toAccount`): it prepares the request, signs it, and
+  takes the hash from the signed bytes before sending them once. A JSON-RPC
+  account's wallet still signs and sends the transaction itself.
+
+### Fixed
+
+- A send that gets no answer is no longer reported without a hash. The hash
+  is looked up first (`eth_getTransactionByHash`). If a node shows the
+  transaction, the call carries on as sent. Otherwise the
+  `ENSC_UPSTREAM_FAILED` error carries `details.txHash`, the transaction to
+  follow, and its message says not to send again: a second send would make
+  a second transaction. The same applies when a node answers that it already
+  holds the transaction. `details.txHash` is absent only when the node
+  refused the transaction and no node shows it, meaning nothing was sent.
+  The message still starts "Failed to broadcast transaction".
+
+### Tests
+
+- `tests/web3.test.ts`: the mock signs locally (`prepareTransactionRequest`,
+  `signTransaction`, `keccak256`, `sendRawTransaction`) and checks:
+  - the hash comes from the signed bytes;
+  - a lost answer is never sent again and carries `details.txHash`;
+  - a transaction a node shows is answered as sent;
+  - a plain refusal carries no hash;
+  - "already known" carries the hash.
+
+  The tests that asserted the request through `sendTransaction` for a raw
+  key now assert it through `prepareTransactionRequest` and
+  `sendRawTransaction`.
+
+### Docs
+
+- README "Unsigned transactions" and `docs/public/conversions.md`: one
+  paragraph on `details.txHash` and what to do with it.
+
 ## 0.6.0
 
 Requires API date version `2026-09-15`, on an API that answers in

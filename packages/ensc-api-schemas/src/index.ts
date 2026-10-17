@@ -223,12 +223,80 @@ export const payerSchema = z.object({
   phone: z.string().min(6).max(32).optional(),
 });
 
+/**
+ * Proof that the counterparty controls `counterparty.wallet`, on the chain of
+ * the request:
+ *   transfer:  for crypto in, the pay-in itself: a mined, successful
+ *              transaction on that chain carrying a Transfer of the
+ *              conversion's own token, of exactly its amount, from the
+ *              wallet. For crypto out, the hash of the earlier pay-in that
+ *              proved the wallet (a wallet proven by no earlier pay-in is
+ *              proven by a signature instead). One transaction proves one
+ *              wallet for one merchant only;
+ *   signature: an EIP-191 personal_sign by the wallet over the text
+ *              `walletProofMessage` returns (ERC-1271 for a contract wallet).
+ * A proven wallet is remembered per merchant, chain and wallet, so later
+ * requests for it need no proof.
+ */
+export const walletProofSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('transfer'),
+      txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'txHash must be 0x and 64 hex characters'),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('signature'),
+      // 65 bytes for a plain wallet; a contract wallet's signature can be
+      // longer (several owners, a passkey), up to 4 KiB.
+      signature: z
+        .string()
+        .regex(
+          /^0x(?:[0-9a-fA-F]{2}){65,4096}$/,
+          'signature must be 0x and 65 to 4096 bytes of hex',
+        ),
+    })
+    .strict(),
+]);
+export type WalletProof = z.infer<typeof walletProofSchema>;
+
+/**
+ * The text a counterparty wallet signs for a `signature` proof (EIP-191
+ * personal_sign). It binds the merchant, the wallet (EIP-55 checksummed) and
+ * the chain id; it holds no secret and never expires.
+ */
+export function walletProofMessage(input: {
+  merchantId: string;
+  wallet: string;
+  chainId: number;
+}): string {
+  return [
+    'ENSC wallet ownership',
+    `Merchant: ${input.merchantId}`,
+    `Wallet: ${input.wallet}`,
+    `Chain ID: ${input.chainId}`,
+    'I confirm that I control this wallet.',
+  ].join('\n');
+}
+
 /** Counterparty details the merchant can supply for transaction screening. */
-export const screeningCounterpartySchema = z.object({
-  type: z.enum(['individual', 'company']).default('individual'),
-  name: z.string().min(1).max(128).optional(),
-  wallet: evmAddressSchema.optional(),
-});
+export const screeningCounterpartySchema = z
+  .object({
+    type: z.enum(['individual', 'company']).default('individual'),
+    name: z.string().min(1).max(128).optional(),
+    wallet: evmAddressSchema.optional(),
+    walletProof: walletProofSchema.optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.walletProof && !v.wallet) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['walletProof'],
+        message: 'walletProof needs counterparty.wallet',
+      });
+    }
+  });
 
 export const conversionMetadataSchema = z
   .record(z.string().min(1).max(40), z.string().max(200))
@@ -385,9 +453,24 @@ export const paymentInstructionsSchema = z.object({
 export type PaymentInstructions = z.infer<typeof paymentInstructionsSchema>;
 
 /**
+ * The two reasons a crypto leg is held for the transfer compliance check
+ * (only where that hold is switched on): `travel_rule_pending`, the check has
+ * not completed yet; `wallet_ownership_unproven`, the counterparty wallet is
+ * not proven (send `counterparty.walletProof`). Neither is an approval or a
+ * decline.
+ */
+export const TRAVEL_RULE_HOLD_REASONS = [
+  'travel_rule_pending',
+  'wallet_ownership_unproven',
+] as const;
+export const travelRuleHoldReasonSchema = z.enum(TRAVEL_RULE_HOLD_REASONS);
+export type TravelRuleHoldReason = z.infer<typeof travelRuleHoldReasonSchema>;
+
+/**
  * A conversion's transaction screening status. SKIPPED: the conversion was
  * not screened, or screening did not complete, and it was let through;
- * neither is an approval.
+ * neither is an approval. `travel_rule_pending` and
+ * `wallet_ownership_unproven` are holds (TRAVEL_RULE_HOLD_REASONS).
  */
 export const SCREENING_STATUSES = [
   'APPROVED',
@@ -395,6 +478,7 @@ export const SCREENING_STATUSES = [
   'DECLINED',
   'AWAITING_USER',
   'SKIPPED',
+  ...TRAVEL_RULE_HOLD_REASONS,
 ] as const;
 export const screeningStatusSchema = z.enum(SCREENING_STATUSES);
 export type ScreeningStatus = z.infer<typeof screeningStatusSchema>;

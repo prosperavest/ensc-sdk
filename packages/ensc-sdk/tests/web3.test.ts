@@ -1,10 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 
 // Mock viem + viem/accounts BEFORE importing the web3 helper, since the helper
-// lazy-imports them. The mock simulates a wallet client that accepts the tx and
-// a public client that answers the chain id, the gas estimate and the receipt.
+// lazy-imports them. The mock simulates a wallet client that prepares and signs
+// the tx (a local account) or sends it (a JSON-RPC account), and a public client
+// that answers the chain id, the gas estimate, the send, the lookup of a hash
+// and the receipt.
 const WALLET = `0x${'1'.repeat(40)}` as const;
+const SIGNED = '0x02signed' as const;
 const sendTransaction = vi.fn(async () => '0xtxhash' as const);
+const prepareTransactionRequest = vi.fn(async (r: Record<string, unknown>) => ({ ...r, nonce: 7 }));
+const signTransaction = vi.fn(async () => SIGNED);
+const sendRawTransaction = vi.fn(async () => '0xtxhash' as const);
+/** eth_getTransactionByHash: null unless a test says the node holds it. */
+const request = vi.fn(async (): Promise<unknown> => null);
+const keccak256 = vi.fn(() => '0xtxhash' as const);
 const waitForTransactionReceipt = vi.fn(async () => ({
   status: 'success' as const,
   blockNumber: 42n,
@@ -14,13 +23,24 @@ const estimateGas = vi.fn(async () => 100_000n);
 const defineChain = vi.fn((c: unknown) => c);
 
 vi.mock('viem', () => ({
-  createWalletClient: vi.fn(() => ({ sendTransaction })),
-  createPublicClient: vi.fn(() => ({ waitForTransactionReceipt, getChainId, estimateGas })),
+  createWalletClient: vi.fn(() => ({
+    sendTransaction,
+    prepareTransactionRequest,
+    signTransaction,
+  })),
+  createPublicClient: vi.fn(() => ({
+    waitForTransactionReceipt,
+    getChainId,
+    estimateGas,
+    sendRawTransaction,
+    request,
+  })),
   defineChain,
   http: vi.fn(() => ({})),
+  keccak256,
 }));
 vi.mock('viem/accounts', () => ({
-  privateKeyToAccount: vi.fn(() => ({ address: WALLET })),
+  privateKeyToAccount: vi.fn(() => ({ address: WALLET, type: 'local', signTransaction: vi.fn() })),
 }));
 
 const { signAndBroadcast, executeVoucher } = await import('../src/web3/index.js');
@@ -38,7 +58,8 @@ const rpcUrl = 'https://rpc.example.com';
 
 describe('web3 helper', () => {
   it('estimates gas without fee fields, then sends with the estimate plus 30 percent', async () => {
-    sendTransaction.mockClear();
+    prepareTransactionRequest.mockClear();
+    sendRawTransaction.mockClear();
     estimateGas.mockClear();
     const res = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl });
     expect(res).toEqual({ txHash: '0xtxhash', status: 'success', blockNumber: 42n });
@@ -49,25 +70,29 @@ describe('web3 helper', () => {
       data: '0xdeadbeef',
       value: 0n,
     });
-    expect(sendTransaction).toHaveBeenCalledWith({
+    expect(prepareTransactionRequest).toHaveBeenCalledWith({
       to: unsignedTx.to,
       data: '0xdeadbeef',
       value: 0n,
       gas: 130_000n,
     });
+    // Signed here, its hash taken from the signed bytes, sent once.
+    expect(keccak256).toHaveBeenCalledWith(SIGNED);
+    expect(sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(sendRawTransaction).toHaveBeenCalledWith({ serializedTransaction: SIGNED });
     expect(defineChain).toHaveBeenCalledWith(expect.objectContaining({ id: 42220 }));
   });
 
   it('an explicit gas limit skips estimation; the margin is configurable', async () => {
-    sendTransaction.mockClear();
+    prepareTransactionRequest.mockClear();
     estimateGas.mockClear();
     await signAndBroadcast(unsignedTx, walletKey, { rpcUrl, gas: 250_000n });
     expect(estimateGas).not.toHaveBeenCalled();
-    expect(sendTransaction.mock.calls[0]?.[0]).toMatchObject({ gas: 250_000n });
+    expect(prepareTransactionRequest.mock.calls[0]?.[0]).toMatchObject({ gas: 250_000n });
 
-    sendTransaction.mockClear();
+    prepareTransactionRequest.mockClear();
     await signAndBroadcast(unsignedTx, walletKey, { rpcUrl, gasMarginPercent: 0 });
-    expect(sendTransaction.mock.calls[0]?.[0]).toMatchObject({ gas: 100_000n });
+    expect(prepareTransactionRequest.mock.calls[0]?.[0]).toMatchObject({ gas: 100_000n });
 
     await expect(
       signAndBroadcast(unsignedTx, walletKey, { rpcUrl, gas: 0n }),
@@ -77,7 +102,7 @@ describe('web3 helper', () => {
   });
 
   it('a failed simulation is reported with the node reason and nothing is broadcast', async () => {
-    sendTransaction.mockClear();
+    sendRawTransaction.mockClear();
     estimateGas.mockRejectedValueOnce(
       Object.assign(new Error('long\nmulti-line'), {
         shortMessage: 'Execution reverted with reason: transfer value exceeded balance of sender.',
@@ -87,7 +112,7 @@ describe('web3 helper', () => {
       code: 'ENSC_UPSTREAM_FAILED',
       message: expect.stringContaining('transfer value exceeded balance of sender'),
     });
-    expect(sendTransaction).not.toHaveBeenCalled();
+    expect(sendRawTransaction).not.toHaveBeenCalled();
   });
 
   it('refuses an RPC endpoint on another chain', async () => {
@@ -132,7 +157,7 @@ describe('web3 helper', () => {
     expect(estimate.message).toContain('The transaction would fail');
     expect(estimate.message).not.toContain('ACCESSKEY');
 
-    sendTransaction.mockRejectedValueOnce(new Error(`socket hang up ${keyedUrl}`));
+    sendRawTransaction.mockRejectedValueOnce(new Error(`socket hang up ${keyedUrl}`));
     const send = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl: keyedUrl }).catch(
       (e: unknown) => e as Error,
     );
@@ -145,6 +170,67 @@ describe('web3 helper', () => {
     );
     expect(receipt).toMatchObject({ details: { txHash: '0xtxhash' } });
     expect(receipt.message).not.toContain('ACCESSKEY');
+  });
+
+  it('a send whose answer is lost is never sent again: the error carries the hash to follow', async () => {
+    sendRawTransaction.mockClear();
+    request.mockClear();
+    sendRawTransaction.mockRejectedValueOnce(
+      Object.assign(new Error('gone'), { shortMessage: 'The request took too long to respond.' }),
+    );
+    const err = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl }).catch(
+      (e: unknown) => e as Error,
+    );
+    expect(err).toMatchObject({
+      code: 'ENSC_UPSTREAM_FAILED',
+      details: { txHash: '0xtxhash' },
+      message: expect.stringContaining('Failed to broadcast transaction'),
+    });
+    expect(err.message).toContain('do not send again');
+    expect(sendRawTransaction).toHaveBeenCalledTimes(1);
+    // The hash was looked up before the failure was answered.
+    expect(request).toHaveBeenCalledWith({
+      method: 'eth_getTransactionByHash',
+      params: ['0xtxhash'],
+    });
+  });
+
+  it('a send the node took although its answer was lost is answered as sent', async () => {
+    sendRawTransaction.mockClear();
+    sendRawTransaction.mockRejectedValueOnce(new Error('socket hang up'));
+    request.mockResolvedValueOnce({ hash: '0xtxhash', blockNumber: null });
+    const res = await signAndBroadcast(unsignedTx, walletKey, { rpcUrl });
+    expect(res).toEqual({ txHash: '0xtxhash', status: 'success', blockNumber: 42n });
+    expect(sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('a node that refuses the transaction in so many words, shown nowhere, sent nothing: no hash', async () => {
+    sendRawTransaction.mockRejectedValueOnce(
+      Object.assign(new Error('Missing or invalid parameters.'), {
+        code: -32000,
+        shortMessage: 'Missing or invalid parameters.',
+        details: 'insufficient funds for gas * price + value',
+      }),
+    );
+    const err = (await signAndBroadcast(unsignedTx, walletKey, { rpcUrl }).catch(
+      (e: unknown) => e,
+    )) as { code: string; details?: unknown };
+    expect(err.code).toBe('ENSC_UPSTREAM_FAILED');
+    expect(err.details).toBeUndefined();
+  });
+
+  it('a node that says it already holds the transaction is not taken at its word, nor is it a refusal: the hash to follow', async () => {
+    sendRawTransaction.mockRejectedValueOnce(
+      Object.assign(new Error('Missing or invalid parameters.'), {
+        code: -32000,
+        shortMessage: 'Missing or invalid parameters.',
+        details: 'already known',
+      }),
+    );
+    await expect(signAndBroadcast(unsignedTx, walletKey, { rpcUrl })).rejects.toMatchObject({
+      code: 'ENSC_UPSTREAM_FAILED',
+      details: { txHash: '0xtxhash' },
+    });
   });
 
   it('refuses a key that is not the wallet named in `from`', async () => {
@@ -173,7 +259,8 @@ describe('web3 helper', () => {
   });
 
   it('executeVoucher sends the approval first, then the converter call, and refuses an expired voucher', async () => {
-    sendTransaction.mockClear();
+    prepareTransactionRequest.mockClear();
+    sendRawTransaction.mockClear();
     const voucher = {
       voucher: { deadline: String(Math.floor(Date.now() / 1000) + 300), wallet: WALLET },
       approvalTransaction: { ...unsignedTx, to: `0x${'2'.repeat(40)}` },
@@ -182,8 +269,10 @@ describe('web3 helper', () => {
     const res = await executeVoucher(voucher, walletKey, { rpcUrl });
     expect(res.approval?.txHash).toBe('0xtxhash');
     expect(res.transaction.txHash).toBe('0xtxhash');
-    expect(sendTransaction).toHaveBeenCalledTimes(2);
-    expect(sendTransaction.mock.calls[0]?.[0]).toMatchObject({ to: `0x${'2'.repeat(40)}` });
+    expect(sendRawTransaction).toHaveBeenCalledTimes(2);
+    expect(prepareTransactionRequest.mock.calls[0]?.[0]).toMatchObject({
+      to: `0x${'2'.repeat(40)}`,
+    });
 
     const expired = { ...(voucher as { voucher: object }), voucher: { deadline: '1' } } as never;
     await expect(executeVoucher(expired, walletKey, { rpcUrl })).rejects.toMatchObject({

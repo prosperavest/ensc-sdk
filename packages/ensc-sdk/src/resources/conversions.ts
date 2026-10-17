@@ -22,6 +22,8 @@
 
 import type * as api from '@ensc/api-schemas';
 import type { HttpClient, ListParams } from '@ensc/sdk-core';
+import { keccak_256 } from '@noble/hashes/sha3.js';
+import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils.js';
 import type { ChainInput, Pair } from '../chains.js';
 
 export type ConversionType = api.ConversionType;
@@ -31,6 +33,27 @@ export type IssuedVoucher = api.IssuedVoucher;
 export type PaymentInstructions = api.PaymentInstructions;
 export type QuoteResponse = api.QuoteResponse;
 export type ScreeningStatusResponse = api.ScreeningStatusResponse;
+/**
+ * A conversion's screening status. `travel_rule_pending` (the compliance
+ * check of a crypto transfer has not completed) and
+ * `wallet_ownership_unproven` (the customer wallet is not proven: send
+ * `counterparty.walletProof`) are holds, never an approval or a decline.
+ */
+export type ScreeningStatus = api.ScreeningStatus;
+export type TravelRuleHoldReason = api.TravelRuleHoldReason;
+/**
+ * Proof that your customer controls `counterparty.wallet` on the chain of the
+ * request. `transfer`: on a crypto-issue, the customer's pay-in (a mined,
+ * successful transfer of the conversion's token and exact amount from the
+ * wallet on that chain); on a crypto-redeem, the earlier pay-in that proved
+ * the wallet; one transaction proves one wallet for one account. `signature`:
+ * an EIP-191 personal_sign by the wallet over {@link walletProofMessage}
+ * (ERC-1271 for a contract wallet). A proven wallet is remembered for your
+ * account on that chain.
+ */
+export type WalletProof =
+  | { type: 'transfer'; txHash: string }
+  | { type: 'signature'; signature: string };
 
 export interface PayoutDestination {
   bankCode: string;
@@ -45,10 +68,49 @@ export interface Payer {
   phone?: string;
 }
 
+/** Your customer: the other party of the conversion. */
 export interface ScreeningCounterparty {
   type?: 'individual' | 'company';
   name?: string;
+  /** Your customer's own wallet (never your signing wallet). */
   wallet?: string;
+  /** Proof that your customer controls `wallet`; needs `wallet`. */
+  walletProof?: WalletProof;
+}
+
+/** An address in EIP-55 mixed case; refuses anything that is not 0x and 40 hex characters. */
+function checksumAddress(address: string): string {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    throw new TypeError('wallet must be 0x and 40 hex characters');
+  }
+  const lower = address.slice(2).toLowerCase();
+  const hash = bytesToHex(keccak_256(utf8ToBytes(lower)));
+  let out = '0x';
+  for (let i = 0; i < 40; i++) {
+    const c = lower[i] as string;
+    out += Number.parseInt(hash[i] as string, 16) >= 8 ? c.toUpperCase() : c;
+  }
+  return out;
+}
+
+/**
+ * The exact text your customer's wallet signs (EIP-191 personal_sign) for a
+ * `signature` wallet proof. It binds your merchant id, the wallet (written
+ * EIP-55 checksummed here, whatever case you pass) and the chain id; it holds
+ * no secret and does not expire.
+ */
+export function walletProofMessage(input: {
+  merchantId: string;
+  wallet: string;
+  chainId: number;
+}): string {
+  return [
+    'ENSC wallet ownership',
+    `Merchant: ${input.merchantId}`,
+    `Wallet: ${checksumAddress(input.wallet)}`,
+    `Chain ID: ${input.chainId}`,
+    'I confirm that I control this wallet.',
+  ].join('\n');
 }
 
 interface CreateConversionBase {
@@ -193,7 +255,10 @@ export class ConversionsResource {
    * Create a conversion. Returns the conversion with its voucher (crypto legs,
    * fiat-redeem) or bank-transfer instructions (fiat-issue). A conversion on a
    * transaction-screening hold comes back with `status: 'screening_hold'`;
-   * poll `screening` or `get`, then call `voucher` once approved.
+   * poll `screening` or `get`, then call `voucher` once approved. A crypto
+   * leg can also be held with `screening.status` `travel_rule_pending` or
+   * `wallet_ownership_unproven`: create again with the same reference and
+   * `counterparty.walletProof`, or call `voucher` once the check completes.
    */
   create(params: CreateConversionParams): Promise<Conversion> {
     const { idempotencyKey, ...rest } = params;

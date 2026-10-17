@@ -1,4 +1,7 @@
+import * as schemas from '@ensc/api-schemas';
+import { getAddress } from 'viem';
 import { describe, expect, it } from 'vitest';
+import { walletProofMessage } from '../src/index.js';
 import { testServer } from './_server.js';
 
 /** Capture every request a client makes, always replying 200 `{}` (sealed). */
@@ -99,6 +102,49 @@ describe('resource routing, conversions and transfers', () => {
       accountName: 'Ada Lovelace',
     });
     expect(body.idempotencyKey).toBeUndefined();
+  });
+
+  it('conversions.create carries the customer counterparty and its wallet proof', async () => {
+    const { client, calls } = recordingClient();
+    const txHash = `0x${'b'.repeat(64)}`;
+    await client.conversions.create({
+      type: 'crypto-redeem',
+      chain: 'celo',
+      wallet: '0x1111111111111111111111111111111111111111',
+      pair: 'USDT',
+      amount: '50',
+      counterparty: {
+        type: 'individual',
+        name: 'Ada Obi',
+        wallet: '0x1111111111111111111111111111111111111111',
+        walletProof: { type: 'transfer', txHash },
+      },
+    });
+    expect(JSON.parse(calls[0]?.body ?? '{}').counterparty).toEqual({
+      type: 'individual',
+      name: 'Ada Obi',
+      wallet: '0x1111111111111111111111111111111111111111',
+      walletProof: { type: 'transfer', txHash },
+    });
+  });
+
+  it('walletProofMessage is the text the API checks, with the wallet EIP-55 checksummed', () => {
+    const lower = `0x${'ab'.repeat(20)}`;
+    const checksummed = getAddress(lower);
+    expect(checksummed).not.toBe(lower);
+    const input = { merchantId: 'mrc_01J00000000000000000000000', chainId: 42220 };
+    const text = walletProofMessage({ ...input, wallet: lower });
+    expect(text).toBe(schemas.walletProofMessage({ ...input, wallet: checksummed }));
+    expect(text).toBe(
+      [
+        'ENSC wallet ownership',
+        'Merchant: mrc_01J00000000000000000000000',
+        `Wallet: ${checksummed}`,
+        'Chain ID: 42220',
+        'I confirm that I control this wallet.',
+      ].join('\n'),
+    );
+    expect(() => walletProofMessage({ ...input, wallet: '0x1234' })).toThrow(TypeError);
   });
 
   it('conversions.events.* → POST /v1/conversions/:reference/events', async () => {

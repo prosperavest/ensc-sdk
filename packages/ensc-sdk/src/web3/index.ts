@@ -211,15 +211,19 @@ export async function signAndBroadcast(
     transport,
   });
   let txHash: `0x${string}`;
-  try {
-    txHash = await wallet.sendTransaction({ to, data, value: 0n, gas } as Parameters<
-      typeof wallet.sendTransaction
-    >[0]);
-  } catch (err) {
-    throw new EnscError(
-      'ENSC_UPSTREAM_FAILED',
-      `Failed to broadcast transaction: ${describeRpcError(err, options.rpcUrl)}`,
-    );
+  if (signsHere(account)) {
+    txHash = await sendSigned(core, wallet, publicClient, { to, data, gas }, options.rpcUrl);
+  } else {
+    try {
+      txHash = await wallet.sendTransaction({ to, data, value: 0n, gas } as Parameters<
+        typeof wallet.sendTransaction
+      >[0]);
+    } catch (err) {
+      throw new EnscError(
+        'ENSC_UPSTREAM_FAILED',
+        `Failed to broadcast transaction: ${describeRpcError(err, options.rpcUrl)}`,
+      );
+    }
   }
   if (options.waitForReceipt === false) return { txHash };
   try {
@@ -229,6 +233,95 @@ export async function signAndBroadcast(
     throw new EnscError(
       'ENSC_UPSTREAM_FAILED',
       `Transaction ${txHash} was sent but its receipt could not be read: ${describeRpcError(err, options.rpcUrl)}`,
+      { txHash },
+    );
+  }
+}
+
+type Viem = typeof import('viem');
+type Hash = `0x${string}`;
+
+/**
+ * Whether the transaction is signed here: a local account (a raw key,
+ * `privateKeyToAccount`, `mnemonicToAccount`, `toAccount`) signs in this
+ * process, so its hash is known before anything is sent. A JSON-RPC account
+ * is signed and sent by its wallet, which answers the hash.
+ */
+function signsHere(account: SignerAccount): boolean {
+  return (
+    account.type === 'local' &&
+    typeof (account as { signTransaction?: unknown }).signTransaction === 'function'
+  );
+}
+
+/**
+ * A node answer that says it already holds this very transaction: it is on
+ * its way, whatever the lookup that follows shows.
+ */
+const ALREADY_KNOWN_RE =
+  /already\s?known|known transaction|already imported|already in (?:the )?(?:tx|transaction)?\s*pool/i;
+
+/**
+ * Signs a local account's transaction, takes its hash from the signed bytes,
+ * then sends it once. A send that fails is never sent again here (a second
+ * copy of a transaction that landed is answered "already known" or "nonce too
+ * low", and a new one would be a second transaction): its hash is looked up.
+ * Found, it is sent. Not found after the node refused it in so many words,
+ * nothing was sent. Otherwise (no answer, a lost answer, a node that says it
+ * holds it, a lookup that does not answer) the outcome is unknown and the
+ * error carries the hash in `details.txHash`: follow that hash, do not send
+ * again.
+ */
+async function sendSigned(
+  core: Viem,
+  wallet: ReturnType<Viem['createWalletClient']>,
+  publicClient: ReturnType<Viem['createPublicClient']>,
+  request: { to: Hash; data: Hash; gas: bigint },
+  rpcUrl: string,
+): Promise<Hash> {
+  let signed: Hash;
+  try {
+    const prepared = await wallet.prepareTransactionRequest({
+      ...request,
+      value: 0n,
+    } as Parameters<typeof wallet.prepareTransactionRequest>[0]);
+    signed = await wallet.signTransaction(
+      prepared as unknown as Parameters<typeof wallet.signTransaction>[0],
+    );
+  } catch (err) {
+    throw new EnscError(
+      'ENSC_UPSTREAM_FAILED',
+      `Failed to broadcast transaction: ${describeRpcError(err, rpcUrl)}`,
+    );
+  }
+  const txHash = core.keccak256(signed);
+  try {
+    await publicClient.sendRawTransaction({ serializedTransaction: signed });
+    return txHash;
+  } catch (err) {
+    let seen: boolean | null;
+    try {
+      seen =
+        (await publicClient.request({
+          method: 'eth_getTransactionByHash',
+          params: [txHash],
+        })) !== null;
+    } catch {
+      seen = null;
+    }
+    if (seen) return txHash;
+    const reason = describeRpcError(err, rpcUrl);
+    // The node's own words are in `details` of the chain library's error, its
+    // summary in `shortMessage`; a JSON-RPC answer carries a numeric `code`.
+    const e = (err ?? {}) as { code?: unknown; details?: unknown; message?: unknown };
+    const answered = typeof e.code === 'number';
+    const said = `${String(e.details ?? '')} ${String(e.message ?? '')}`;
+    if (seen === false && answered && !ALREADY_KNOWN_RE.test(said)) {
+      throw new EnscError('ENSC_UPSTREAM_FAILED', `Failed to broadcast transaction: ${reason}`);
+    }
+    throw new EnscError(
+      'ENSC_UPSTREAM_FAILED',
+      `Failed to broadcast transaction: ${reason}. Transaction ${txHash} may have been sent: follow it, do not send again`,
       { txHash },
     );
   }
